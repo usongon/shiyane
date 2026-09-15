@@ -56,8 +56,9 @@ pub struct FilePipeline {
     source_language: String,
     checkpoint: Option<Checkpoint>,
     checkpoint_path: Option<PathBuf>,
-    total_segments: usize,
-    completed_segments: usize,
+    /// 本次运行期望的配置指纹（init 时注入；生产中由当前 config 构建，
+    /// 用于与盘上 checkpoint 指纹比对判定续跑/重翻/全量重跑）
+    current_fingerprint: Option<CheckpointFingerprint>,
     progress: Arc<Mutex<f64>>,
     phase: Arc<Mutex<Phase>>,
 }
@@ -80,8 +81,7 @@ impl FilePipeline {
             source_language,
             checkpoint: None,
             checkpoint_path: None,
-            total_segments: 0,
-            completed_segments: 0,
+            current_fingerprint: None,
             progress: Arc::new(Mutex::new(0.0)),
             phase: Arc::new(Mutex::new(Phase::Extracting)),
         }
@@ -110,10 +110,11 @@ impl FilePipeline {
 
         let checkpoint = match Checkpoint::load(&checkpoint_path)? {
             Some(c) => c,
-            None => Checkpoint::new(task_id, video_path, fingerprint),
+            None => Checkpoint::new(task_id, video_path, fingerprint.clone()),
         };
         self.checkpoint = Some(checkpoint);
         self.checkpoint_path = Some(checkpoint_path);
+        self.current_fingerprint = Some(fingerprint);
         Ok(())
     }
     
@@ -158,111 +159,224 @@ impl FilePipeline {
             }
         }
 
-        // Extract full audio to temporary WAV file
-        tracing::info!("Extracting audio from video...");
-        let audio_path = match self.audio_source.extract_full_audio_to_wav().await {
-            Ok(path) => path,
-            Err(e) => {
-                let mut state = self.state.lock().await;
-                *state = PipelineState::Failed(e.to_string());
-                return Err(e);
+        // ---- 断点续传：指纹校验 ----
+        // 当前指纹优先取 init 时注入的（生产中由当前 config 构建、二者恒等；
+        // 测试通过注入不同指纹表达"配置变更"）。未 init 时退回从 config 推导。
+        let current_fp = self.current_fingerprint.clone().unwrap_or_else(|| {
+            CheckpointFingerprint {
+                source_language: self.source_language.clone(),
+                target_lang: self.config.translate.target_lang.clone(),
+                translate_provider: self.config.translate.provider.clone(),
+                translate_model: self.config.translate.model.clone(),
+                asr_model: self.config.asr.file_model.clone(),
             }
-        };
-
-        tracing::info!("Audio extracted to: {:?}", audio_path);
-
-        // Audio size limit: min(OSS simple-upload max 5GB, 50GB)
-        const MAX_AUDIO_BYTES: u64 = 5 * 1024 * 1024 * 1024;
-        let audio_size = std::fs::metadata(&audio_path).map(|m| m.len()).unwrap_or(0);
-        if audio_size > MAX_AUDIO_BYTES {
-            let _ = std::fs::remove_file(&audio_path);
-            let msg = format!(
-                "提取的音频文件大小 {:.1}GB 超过限制（最大 5GB）",
-                audio_size as f64 / 1024.0 / 1024.0 / 1024.0
-            );
-            let mut state = self.state.lock().await;
-            *state = PipelineState::Failed(msg.clone());
-            return Err(Error::AudioSource(msg));
+        });
+        if let (Some(cp), Some(cp_path)) = (&mut self.checkpoint, &self.checkpoint_path.clone()) {
+            if !cp.segments.is_empty() && cp.fingerprint != current_fp {
+                let asr_invalid = cp.fingerprint.source_language != current_fp.source_language
+                    || cp.fingerprint.asr_model != current_fp.asr_model;
+                if asr_invalid {
+                    tracing::info!(
+                        "源语言/ASR 模型变更（{:?} → {:?}），checkpoint 作废全量重跑",
+                        cp.fingerprint,
+                        current_fp
+                    );
+                    let (task_id, video_path) = (cp.task_id.clone(), cp.video_path.clone());
+                    *cp = Checkpoint::new(task_id, video_path, current_fp.clone());
+                } else {
+                    tracing::info!("翻译配置变更，保留 ASR 结果、清空译文重翻");
+                    cp.fingerprint = current_fp.clone();
+                    for seg in cp.segments.iter_mut() {
+                        seg.status = SegmentStatus::Pending;
+                        seg.translated = None;
+                    }
+                }
+                if let Err(e) = cp.save(cp_path) {
+                    tracing::warn!("checkpoint 指纹重置写盘失败: {}", e);
+                }
+            }
         }
 
-        // Prepare ASR config
-        let asr_config = AsrConfig {
-            provider: self.config.asr.provider.clone(),
-            model: self.config.asr.file_model.clone(),
-            api_key: self.config.asr.api_key.clone(),
-            language: self.source_language.clone(),
-            workspace_id: self.config.asr.workspace_id.clone(),
-        };
+        // ---- 断点续传：从 checkpoint 重建句子，或走全新流程 ----
+        struct Item {
+            source: String,
+            begin: f64,
+            end: f64,
+            translated: Option<String>,
+        }
+        let mut items: Option<Vec<Item>> = None;
+        if let Some(cp) = &self.checkpoint {
+            if !cp.segments.is_empty() {
+                tracing::info!(
+                    "断点续传：{}/{} 句已完成，跳过音频提取/OSS/ASR",
+                    cp.completed_count(),
+                    cp.segments.len()
+                );
+                items = Some(
+                    cp.segments
+                        .iter()
+                        .map(|s| Item {
+                            source: s.source.clone().unwrap_or_default(),
+                            begin: s.start_time.unwrap_or(0.0),
+                            end: s.end_time.unwrap_or(0.0),
+                            translated: s.translated.clone(),
+                        })
+                        .collect(),
+                );
+            }
+        }
 
-        // Transcribe the complete audio file
-        let mut phase = self.phase.lock().await;
-        *phase = Phase::Transcribing;
-        drop(phase);
+        if items.is_none() {
+            // Extract full audio to temporary WAV file
+            tracing::info!("Extracting audio from video...");
+            let audio_path = match self.audio_source.extract_full_audio_to_wav().await {
+                Ok(path) => path,
+                Err(e) => {
+                    let mut state = self.state.lock().await;
+                    *state = PipelineState::Failed(e.to_string());
+                    return Err(e);
+                }
+            };
 
-        tracing::info!("Starting file transcription with model: {}", asr_config.model);
-        let transcription = match self.asr_provider.transcribe_file(&asr_config, &audio_path).await {
-            Ok(result) => result,
-            Err(e) => {
-                let mut state = self.state.lock().await;
-                *state = PipelineState::Failed(e.to_string());
-                // Clean up temp file
+            tracing::info!("Audio extracted to: {:?}", audio_path);
+
+            // Audio size limit: min(OSS simple-upload max 5GB, 50GB)
+            const MAX_AUDIO_BYTES: u64 = 5 * 1024 * 1024 * 1024;
+            let audio_size = std::fs::metadata(&audio_path).map(|m| m.len()).unwrap_or(0);
+            if audio_size > MAX_AUDIO_BYTES {
                 let _ = std::fs::remove_file(&audio_path);
-                return Err(e);
+                let msg = format!(
+                    "提取的音频文件大小 {:.1}GB 超过限制（最大 5GB）",
+                    audio_size as f64 / 1024.0 / 1024.0 / 1024.0
+                );
+                let mut state = self.state.lock().await;
+                *state = PipelineState::Failed(msg.clone());
+                return Err(Error::AudioSource(msg));
             }
-        };
-        
-        tracing::info!("Transcription completed: {} sentences", transcription.sentences.len());
 
-        // Clean up temp audio file
-        if let Err(e) = std::fs::remove_file(&audio_path) {
-            tracing::warn!("Failed to delete temp audio file {:?}: {}", audio_path, e);
-        }
+            // Prepare ASR config
+            let asr_config = AsrConfig {
+                provider: self.config.asr.provider.clone(),
+                model: self.config.asr.file_model.clone(),
+                api_key: self.config.asr.api_key.clone(),
+                language: self.source_language.clone(),
+                workspace_id: self.config.asr.workspace_id.clone(),
+            };
 
-        // 整批句子落盘为 Pending（断点续传的起点）
-        if let (Some(cp), Some(cp_path)) = (&mut self.checkpoint, &self.checkpoint_path) {
-            cp.segments = transcription
-                .sentences
-                .iter()
-                .enumerate()
-                .map(|(i, s)| SegmentProgress {
-                    segment_id: i,
-                    start_time: Some(s.begin_time),
-                    end_time: Some(s.end_time),
-                    status: SegmentStatus::Pending,
-                    source: Some(s.text.clone()),
-                    translated: None,
-                })
-                .collect();
-            if let Err(e) = cp.save(cp_path) {
-                tracing::warn!("checkpoint 写盘失败（不影响本次任务，但断点续传不可用）: {}", e);
+            // Transcribe the complete audio file
+            let mut phase = self.phase.lock().await;
+            *phase = Phase::Transcribing;
+            drop(phase);
+
+            tracing::info!("Starting file transcription with model: {}", asr_config.model);
+            let transcription =
+                match self.asr_provider.transcribe_file(&asr_config, &audio_path).await {
+                    Ok(result) => result,
+                    Err(e) => {
+                        let mut state = self.state.lock().await;
+                        *state = PipelineState::Failed(e.to_string());
+                        // Clean up temp file
+                        let _ = std::fs::remove_file(&audio_path);
+                        return Err(e);
+                    }
+                };
+
+            tracing::info!("Transcription completed: {} sentences", transcription.sentences.len());
+
+            // Clean up temp audio file
+            if let Err(e) = std::fs::remove_file(&audio_path) {
+                tracing::warn!("Failed to delete temp audio file {:?}: {}", audio_path, e);
             }
+
+            // 整批句子落盘为 Pending（断点续传的起点）
+            if let (Some(cp), Some(cp_path)) = (&mut self.checkpoint, &self.checkpoint_path) {
+                cp.segments = transcription
+                    .sentences
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| SegmentProgress {
+                        segment_id: i,
+                        start_time: Some(s.begin_time),
+                        end_time: Some(s.end_time),
+                        status: SegmentStatus::Pending,
+                        source: Some(s.text.clone()),
+                        translated: None,
+                    })
+                    .collect();
+                if let Err(e) = cp.save(cp_path) {
+                    tracing::warn!("checkpoint 写盘失败（不影响本次任务，但断点续传不可用）: {}", e);
+                }
+            }
+
+            items = Some(
+                transcription
+                    .sentences
+                    .iter()
+                    .map(|s| Item {
+                        source: s.text.clone(),
+                        begin: s.begin_time,
+                        end: s.end_time,
+                        translated: None,
+                    })
+                    .collect(),
+            );
         }
 
         // Translate each sentence and create subtitle entries
+        let items = items.expect("items 必然已构造");
+        let total_sentences = items.len();
+        let completed_before = items.iter().filter(|i| i.translated.is_some()).count();
+
         let mut phase = self.phase.lock().await;
         *phase = Phase::Translating;
         drop(phase);
 
-        let total_sentences = transcription.sentences.len();
-        let mut entries = Vec::new();
-        let mut previous_texts: Vec<String> = Vec::new();
+        // 续跑时进度直接从断点起跳（44.8% 起步而不是 0%）
+        {
+            let mut p = self.progress.lock().await;
+            *p = if total_sentences == 0 {
+                1.0
+            } else {
+                completed_before as f64 / total_sentences as f64
+            };
+        }
 
-        for (idx, sentence) in transcription.sentences.iter().enumerate() {
-            tracing::info!("Translating sentence {}/{}: '{}'", idx + 1, total_sentences, sentence.text);
-            
-            // Build translation request with context
+        // 翻译上下文跨重启重建：取已完成前缀的原文
+        // （take_while 而非 filter：中间有洞时 context 不得跳句）
+        let mut previous_texts: Vec<String> = items
+            .iter()
+            .take_while(|i| i.translated.is_some())
+            .map(|i| i.source.clone())
+            .collect();
+
+        let mut entries: Vec<SubtitleEntry> = Vec::with_capacity(total_sentences);
+        for (idx, item) in items.iter().enumerate() {
+            if let Some(done) = &item.translated {
+                entries.push(SubtitleEntry {
+                    content_start: item.begin,
+                    content_end: item.end,
+                    wall_start: (item.begin * 1000.0) as i64,
+                    wall_end: (item.end * 1000.0) as i64,
+                    source: item.source.clone(),
+                    translated: done.clone(),
+                    status: SubtitleStatus::Final,
+                });
+                continue;
+            }
+
+            tracing::info!(
+                "翻译第 {}/{} 句: '{}'",
+                idx + 1,
+                total_sentences,
+                item.source
+            );
             let translate_req = TranslateRequest {
-                text: sentence.text.clone(),
+                text: item.source.clone(),
                 source_lang: "auto".to_string(),
                 target_lang: self.config.translate.target_lang.clone(),
-                context: previous_texts.iter()
-                    .rev()
-                    .take(10)
-                    .cloned()
-                    .collect(),
+                context: previous_texts.iter().rev().take(10).cloned().collect(),
                 glossary: None,
             };
-            
             let translate_resp = match self.translate_provider.translate(translate_req).await {
                 Ok(resp) => resp,
                 Err(e) => {
@@ -271,40 +385,40 @@ impl FilePipeline {
                     return Err(e);
                 }
             };
-            
-            // Create subtitle entry
-            let entry = SubtitleEntry {
-                content_start: sentence.begin_time,
-                content_end: sentence.end_time,
-                wall_start: (sentence.begin_time * 1000.0) as i64,
-                wall_end: (sentence.end_time * 1000.0) as i64,
-                source: sentence.text.clone(),
+
+            entries.push(SubtitleEntry {
+                content_start: item.begin,
+                content_end: item.end,
+                wall_start: (item.begin * 1000.0) as i64,
+                wall_end: (item.end * 1000.0) as i64,
+                source: item.source.clone(),
                 translated: translate_resp.translated_text,
                 status: SubtitleStatus::Final,
-            };
-            
-            entries.push(entry);
-            previous_texts.push(sentence.text.clone());
+            });
+            previous_texts.push(item.source.clone());
 
             // 逐句追加 Completed 更新行（O(1)，电影规模安全）
             if let (Some(cp), Some(cp_path)) = (&mut self.checkpoint, &self.checkpoint_path) {
                 if let Some(seg) = cp.segments.get_mut(idx) {
                     seg.status = SegmentStatus::Completed;
                     seg.translated = Some(entries.last().unwrap().translated.clone());
-                    if let Err(e) =
-                        Checkpoint::append_updates(cp_path, std::slice::from_ref(seg))
-                    {
+                    if let Err(e) = Checkpoint::append_updates(cp_path, std::slice::from_ref(seg)) {
                         tracing::warn!("checkpoint 追加失败（继续运行）: {}", e);
                     }
                 }
             }
 
-            // Update progress
+            // 进度：entries.len() 在续跑时从 completed_before 起步（预填句也算），
+            // 所以 entries.len()/total 天然等于全局进度
             let mut p = self.progress.lock().await;
-            *p = (idx + 1) as f64 / total_sentences as f64;
+            *p = entries.len() as f64 / total_sentences.max(1) as f64;
             drop(p);
-            
-            tracing::info!("Progress: {}/{} sentences = {:.1}%", idx + 1, total_sentences, ((idx + 1) as f64 / total_sentences as f64) * 100.0);
+            tracing::info!(
+                "Progress: {}/{} sentences = {:.1}%",
+                entries.len(),
+                total_sentences,
+                entries.len() as f64 / total_sentences.max(1) as f64 * 100.0
+            );
         }
 
         // Store entries

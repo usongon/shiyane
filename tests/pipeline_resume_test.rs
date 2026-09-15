@@ -188,3 +188,153 @@ async fn mid_run_failure_keeps_completed_sentences_on_disk() {
     assert_eq!(cp.completed_count(), 2); // 前两句已落盘
     assert_eq!(cp.segments[2].status, pick_up_sound_text::checkpoint::SegmentStatus::Pending);
 }
+
+#[tokio::test]
+async fn resume_skips_asr_and_translates_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    // 第一次：第 3 句翻译失败 → 盘上 2 句 Completed
+    let (mut p1, _e1, asr1, _c1) =
+        build_pipeline(dir.path(), "t-resume", fp("auto", "zh"), sentences(5), Some(2), "r1");
+    assert!(p1.process().await.is_err());
+    assert_eq!(asr1.load(Ordering::SeqCst), 1);
+
+    // 第二次：同目录同指纹，全新 provider 实例（计数归零）
+    let (mut p2, extract2, asr2, calls2) =
+        build_pipeline(dir.path(), "t-resume", fp("auto", "zh"), sentences(5), None, "r2");
+    p2.process().await.unwrap();
+
+    assert_eq!(asr2.load(Ordering::SeqCst), 0, "续跑必须跳过 ASR");
+    assert_eq!(extract2.load(Ordering::SeqCst), 0, "续跑必须跳过音频提取");
+    let texts = calls2.lock().unwrap().clone();
+    assert_eq!(texts, vec!["s2", "s3", "s4"], "只翻剩余句子");
+    assert_eq!((p2.get_progress().await * 100.0).round() as i64, 100);
+
+    let entries = p2.get_entries().await;
+    assert_eq!(entries.len(), 5);
+    assert_eq!(entries[2].translated, "[T] s2");
+    assert_eq!(entries[4].translated, "[T] s4");
+    assert_eq!(entries[0].translated, "[T] s0", "重建的已完成句保留旧译文");
+}
+
+#[tokio::test]
+async fn all_completed_restores_instantly_without_api_calls() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut p1, _e1, _asr1, _c1) =
+        build_pipeline(dir.path(), "t-done", fp("auto", "zh"), sentences(4), None, "d1");
+    p1.process().await.unwrap();
+
+    let (mut p2, extract2, asr2, calls2) =
+        build_pipeline(dir.path(), "t-done", fp("auto", "zh"), sentences(4), None, "d2");
+    p2.process().await.unwrap();
+
+    assert_eq!(asr2.load(Ordering::SeqCst), 0);
+    assert_eq!(extract2.load(Ordering::SeqCst), 0);
+    assert!(calls2.lock().unwrap().is_empty());
+    assert_eq!(p2.get_state().await, pick_up_sound_text::pipeline::PipelineState::Completed);
+    let entries = p2.get_entries().await;
+    assert_eq!(entries.len(), 4);
+    assert_eq!(entries[3].translated, "[T] s3");
+}
+
+#[tokio::test]
+async fn target_lang_change_keeps_asr_retranslates_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut p1, _e1, _asr1, _c1) =
+        build_pipeline(dir.path(), "t-lang", fp("auto", "zh"), sentences(4), None, "l1");
+    p1.process().await.unwrap();
+
+    let (mut p2, extract2, asr2, calls2) =
+        build_pipeline(dir.path(), "t-lang", fp("auto", "en"), sentences(4), None, "l2");
+    p2.process().await.unwrap();
+
+    assert_eq!(asr2.load(Ordering::SeqCst), 0, "改目标语言不得重跑 ASR");
+    assert_eq!(extract2.load(Ordering::SeqCst), 0);
+    assert_eq!(calls2.lock().unwrap().len(), 4, "全部句子重翻");
+
+    // checkpoint 指纹已更新为新语言
+    let cp = Checkpoint::load(&dir.path().join("t-lang/progress.jsonl"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(cp.fingerprint.target_lang, "en");
+}
+
+#[tokio::test]
+async fn source_language_change_reruns_asr() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut p1, _e1, _asr1, _c1) =
+        build_pipeline(dir.path(), "t-src", fp("auto", "zh"), sentences(4), None, "s1");
+    p1.process().await.unwrap();
+
+    let (mut p2, _extract2, asr2, calls2) =
+        build_pipeline(dir.path(), "t-src", fp("ja", "zh"), sentences(4), None, "s2");
+    p2.process().await.unwrap();
+
+    assert_eq!(asr2.load(Ordering::SeqCst), 1, "改源语言必须重跑 ASR");
+    assert_eq!(calls2.lock().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn resume_seeds_translation_context_from_checkpoint() {
+    /// 记录每次翻译请求的 context（包一层 MockTranslate）
+    struct CtxCapture {
+        inner: MockTranslate,
+        contexts: Arc<StdMutex<Vec<Vec<String>>>>,
+    }
+    #[async_trait]
+    impl TranslateProvider for CtxCapture {
+        async fn translate(&self, req: TranslateRequest) -> Result<TranslateResponse> {
+            self.contexts.lock().unwrap().push(req.context.clone());
+            self.inner.translate(req).await
+        }
+        async fn test_connection(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    // 第一次：第 3 句翻译失败 → 盘上 s0、s1 已完成
+    let (mut p1, _e1, _asr1, _c1) =
+        build_pipeline(dir.path(), "t-ctx", fp("auto", "zh"), sentences(5), Some(2), "x1");
+    assert!(p1.process().await.is_err());
+
+    let contexts: Arc<StdMutex<Vec<Vec<String>>>> = Arc::new(StdMutex::new(Vec::new()));
+    let extract = Arc::new(AtomicUsize::new(0));
+    let asr_count = Arc::new(AtomicUsize::new(0));
+    let call_texts = Arc::new(StdMutex::new(Vec::new()));
+    let mut p2 = FilePipeline::new(
+        Box::new(MockAudioSource {
+            extract_count: extract.clone(),
+            tag: "x2".to_string(),
+        }),
+        Box::new(MockFileAsr {
+            sentences: sentences(5),
+            call_count: asr_count.clone(),
+        }),
+        Box::new(CtxCapture {
+            inner: MockTranslate {
+                fail_on: None,
+                call_texts: call_texts.clone(),
+            },
+            contexts: contexts.clone(),
+        }),
+        AppConfig::default(),
+        "auto".to_string(),
+    );
+    p2.init_checkpoint_in(
+        dir.path().to_path_buf(),
+        "t-ctx".to_string(),
+        PathBuf::from("/tmp/resume_test_video.mp4"),
+        fp("auto", "zh"),
+    )
+    .unwrap();
+    p2.process().await.unwrap();
+
+    // 续翻首句（s2）的 context 必须含已完成句 s0、s1（跨重启保持翻译上下文）
+    let all = contexts.lock().unwrap();
+    assert!(!all.is_empty());
+    let first = &all[0];
+    assert!(
+        first.contains(&"s0".to_string()) && first.contains(&"s1".to_string()),
+        "续翻首句 context 应含 s0/s1，实际: {first:?}"
+    );
+}
