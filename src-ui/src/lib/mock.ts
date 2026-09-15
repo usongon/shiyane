@@ -26,7 +26,7 @@ let config: AppConfig = {
   },
 };
 
-let progress: ProgressInfo = { state: "idle", progress: 0, error: null };
+let progress: ProgressInfo = { state: "idle", progress: 0, error: null, phase: "idle" };
 let timer: number | null = null;
 
 function stopTimer() {
@@ -49,19 +49,26 @@ export const mockBackend: Backend = {
   async startFileProcessing(_videoPath, _sourceLanguage) {
     await delay(400);
     stopTimer();
-    progress = { state: "processing", progress: 0.02, error: null };
-    // 模拟：慢速推进 → 快速推进 → 完成，用于浏览器演示全流程
+    progress = { state: "processing", progress: 0.02, error: null, phase: "extracting" };
+    // 模拟：提取音频 → 转写 → 翻译逐段推进，用于浏览器演示全流程与 Steps 阶段显示
     timer = window.setInterval(() => {
       if (progress.state !== "processing") {
         stopTimer();
         return;
       }
-      const step = progress.progress < 0.15 ? 0.008 : 0.03 + Math.random() * 0.02;
-      const next = Math.min(1, progress.progress + step);
+      if (progress.phase === "extracting") {
+        progress = { state: "processing", progress: 0.05, error: null, phase: "transcribing" };
+        return;
+      }
+      if (progress.phase === "transcribing") {
+        progress = { state: "processing", progress: 0.08, error: null, phase: "translating" };
+        return;
+      }
+      const next = Math.min(1, progress.progress + 0.03 + Math.random() * 0.02);
       progress =
         next >= 1
-          ? { state: "completed", progress: 1, error: null }
-          : { state: "processing", progress: next, error: null };
+          ? { state: "completed", progress: 1, error: null, phase: "done" }
+          : { state: "processing", progress: next, error: null, phase: "translating" };
     }, 400);
     return "demo-task";
   },
@@ -89,20 +96,32 @@ export const mockBackend: Backend = {
         video_path: "/Users/demo/Movies/tears_of_steel_1080p.mp4",
         file_name: "tears_of_steel_1080p.mp4",
         modified_at: now - 3600,
+        state: "completed",
+        percent: 1,
       },
       {
         task_id: "d4e5f6",
         video_path: "/Users/demo/Movies/product_demo_final.mp4",
         file_name: "product_demo_final.mp4",
         modified_at: now - 86400,
+        state: "translating",
+        percent: 0.45,
       },
       {
         task_id: "g7h8i9",
         video_path: "/Users/demo/Movies/meeting_recording_0912.mkv",
         file_name: "meeting_recording_0912.mkv",
         modified_at: now - 86400 * 3,
+        state: "fresh",
+        percent: 0,
       },
     ];
+  },
+  async getTaskStatus(videoPath) {
+    await delay(200);
+    if (videoPath.includes("tears_of_steel")) return { state: "completed", percent: 1 };
+    if (videoPath.includes("product_demo")) return { state: "translating", percent: 0.45 };
+    return { state: "fresh", percent: 0 };
   },
   async pickVideoFile() {
     await delay(350);

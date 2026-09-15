@@ -2,7 +2,7 @@ import { createContext } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { AppConfig, ProgressInfo, RecentTask } from "./types";
+import type { AppConfig, ProgressInfo, RecentTask, TaskStatus } from "./types";
 import { mockBackend } from "./mock";
 
 export interface DragHandlers {
@@ -21,6 +21,7 @@ export interface Backend {
   testAsrConnection(config: AppConfig): Promise<string>;
   testTranslateConnection(config: AppConfig): Promise<string>;
   listRecentTasks(): Promise<RecentTask[]>;
+  getTaskStatus(videoPath: string): Promise<TaskStatus>;
   pickVideoFile(): Promise<string | null>;
   onDragEvent(handlers: DragHandlers): Promise<() => void>;
 }
@@ -42,6 +43,8 @@ const tauriBackend: Backend = {
   testTranslateConnection: (config) =>
     invoke<string>("test_translate_connection", { config }),
   listRecentTasks: () => invoke<RecentTask[]>("list_recent_tasks"),
+  getTaskStatus: (videoPath) =>
+    invoke<TaskStatus>("get_task_status", { videoPath }),
   pickVideoFile: async () => {
     const path = await open({
       multiple: false,

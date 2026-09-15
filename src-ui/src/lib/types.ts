@@ -34,17 +34,29 @@ export type PipelineStateName =
   | "exported"
   | "failed";
 
+export type PhaseName = "idle" | "extracting" | "transcribing" | "translating" | "done";
+
 export interface ProgressInfo {
   state: PipelineStateName;
   progress: number;
   error: string | null;
+  phase: PhaseName;
 }
+
+export type RecentTaskState = "fresh" | "translating" | "completed";
 
 export interface RecentTask {
   task_id: string;
   video_path: string;
   file_name: string;
   modified_at: number;
+  state: RecentTaskState;
+  percent: number;
+}
+
+export interface TaskStatus {
+  state: RecentTaskState;
+  percent: number;
 }
 
 export function basename(path: string): string {

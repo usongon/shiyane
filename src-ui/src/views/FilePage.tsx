@@ -19,7 +19,7 @@ import {
 } from "@ant-design/icons";
 import { BackendContext } from "../lib/backend";
 import { basename } from "../lib/types";
-import type { PipelineStateName, ProgressInfo, RecentTask } from "../lib/types";
+import type { PipelineStateName, ProgressInfo, RecentTask, TaskStatus } from "../lib/types";
 import { PRIMARY } from "../theme";
 
 const LANGUAGES = [
@@ -54,6 +54,7 @@ export default function FilePage({ active }: { active: boolean }) {
   const [dragOver, setDragOver] = useState(false);
   const [starting, setStarting] = useState(false);
   const [task, setTask] = useState<Task | null>(null);
+  const [fileStatus, setFileStatus] = useState<TaskStatus | null>(null);
   const [exporting, setExporting] = useState<"srt" | "vtt" | null>(null);
   const [recentTasks, setRecentTasks] = useState<RecentTask[]>([]);
 
@@ -96,9 +97,18 @@ export default function FilePage({ active }: { active: boolean }) {
       .catch(() => setRecentTasks([]));
   }, [active, file, backend]);
 
-  const selectFile = useCallback((path: string) => {
-    setFile({ path, name: basename(path) });
-  }, []);
+  const selectFile = useCallback(
+    (path: string) => {
+      setFile({ path, name: basename(path) });
+      setTask(null);
+      setFileStatus(null);
+      backend
+        .getTaskStatus(path)
+        .then(setFileStatus)
+        .catch(() => setFileStatus(null));
+    },
+    [backend],
+  );
 
   useEffect(() => {
     let disposed = false;
@@ -147,7 +157,12 @@ export default function FilePage({ active }: { active: boolean }) {
       setTask({
         id,
         fileName: file.name,
-        progress: { state: "idle", progress: 0, error: null },
+        progress: {
+          state: "idle",
+          progress: fileStatus?.percent ?? 0,
+          error: null,
+          phase: "extracting",
+        },
       });
       startPolling();
     } catch (e) {
@@ -183,15 +198,18 @@ export default function FilePage({ active }: { active: boolean }) {
     (task.progress.state === "completed" || task.progress.state === "exported");
   const failed = task !== null && task.progress.state === "failed";
 
+  const phase = task?.progress.phase ?? "idle";
   const stepIndex = !task
     ? -1
     : task.progress.state === "idle"
       ? 0
-      : task.progress.state === "processing"
-        ? pct < 50
+      : phase === "extracting"
+        ? 0
+        : phase === "transcribing"
           ? 1
-          : 2
-        : 3;
+          : phase === "translating"
+            ? 2
+            : 3;
 
   const formatRelativeTime = (ts: number): string => {
     const diff = Math.floor(Date.now() / 1000) - ts;
@@ -255,6 +273,13 @@ export default function FilePage({ active }: { active: boolean }) {
                   />
                   <span className="recent-name">{rt.file_name}</span>
                   <span className="recent-time mono">{formatRelativeTime(rt.modified_at)}</span>
+                  <span className={`recent-badge ${rt.state}`}>
+                    {rt.state === "completed"
+                      ? "已完成"
+                      : rt.state === "translating"
+                        ? `翻译中断 · ${Math.round(rt.percent * 100)}%`
+                        : "未开始"}
+                  </span>
                 </div>
               ))}
             </div>
@@ -318,7 +343,13 @@ export default function FilePage({ active }: { active: boolean }) {
               disabled={taskRunning}
               onClick={onStart}
             >
-              {task && done ? "重新处理" : "开始转字幕"}
+              {task && done
+                ? "重新处理"
+                : fileStatus?.state === "translating"
+                  ? `继续处理（${Math.round((fileStatus.percent ?? 0) * 100)}%）`
+                  : fileStatus?.state === "completed"
+                    ? "重新处理"
+                    : "开始转字幕"}
             </Button>
           </div>
 

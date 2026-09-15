@@ -324,6 +324,26 @@ body {
   flex: none;
 }
 
+.recent-badge {
+  flex: none;
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 4px 8px;
+  border-radius: 999px;
+}
+.recent-badge.completed {
+  background: #dcfce7;
+  color: #15803d;
+}
+.recent-badge.translating {
+  background: #eef2ff;
+  color: #4f46e5;
+}
+.recent-badge.fresh {
+  background: #f3f4f6;
+  color: #6b7280;
+}
+
 /* —— 设置抽屉 —— */
 
 .settings-section-title {
