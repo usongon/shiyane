@@ -87,15 +87,6 @@ impl FilePipeline {
         }
     }
     
-    /// Initialize checkpoint for resume from breakpoint
-    /// （旧入口：固定本机 tasks 目录，命令层过渡使用，Task 5 接线后移除）
-    pub fn init_checkpoint(&mut self, task_id: String, video_path: PathBuf) -> Result<()> {
-        let dir = dirs::home_dir()
-            .ok_or_else(|| Error::Config("Cannot find home directory".to_string()))?
-            .join("Library/Application Support/pick-up-sound-text/tasks");
-        self.init_checkpoint_in(dir, task_id, video_path, Default::default())
-    }
-
     /// 初始化 checkpoint（目录可注入，供测试与 Tauri app_data_dir 使用）
     pub fn init_checkpoint_in(
         &mut self,

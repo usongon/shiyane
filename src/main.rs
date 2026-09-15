@@ -1,6 +1,10 @@
 mod commands;
 
-use commands::{export_subtitle, get_config, get_processing_progress, list_recent_tasks, save_config, start_file_processing, test_asr_connection, test_translate_connection, AppState};
+use commands::{
+    export_subtitle, get_config, get_processing_progress, get_task_status, list_recent_tasks,
+    save_config, start_file_processing, test_asr_connection, test_translate_connection,
+    AppState,
+};
 use pick_up_sound_text::config::AppConfig;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -22,6 +26,7 @@ fn main() {
         config: Arc::new(Mutex::new(config)),
         pipeline: Arc::new(Mutex::new(None)),
         pipeline_progress: Arc::new(Mutex::new(None)),
+        pipeline_phase: Arc::new(Mutex::new(None)),
     };
 
     tauri::Builder::default()
@@ -36,6 +41,7 @@ fn main() {
             test_asr_connection,
             test_translate_connection,
             list_recent_tasks,
+            get_task_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

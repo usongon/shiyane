@@ -1,5 +1,6 @@
 use pick_up_sound_text::asr::DashScopeFileTransProvider;
 use pick_up_sound_text::audio::FileAudioSource;
+use pick_up_sound_text::checkpoint::{compute_task_id, Checkpoint, CheckpointFingerprint};
 use pick_up_sound_text::config::{AppConfig, translate_provider_preset};
 use pick_up_sound_text::pipeline::{FilePipeline, PipelineState};
 use pick_up_sound_text::subtitle::{generate_srt, generate_vtt, SubtitleEntry};
@@ -7,7 +8,7 @@ use pick_up_sound_text::translate::{OpenAiCompatibleProvider, TranslateProvider}
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -17,6 +18,21 @@ pub struct ProgressInfo {
     pub state: String,
     pub progress: f64,
     pub error: Option<String>,
+    pub phase: String,
+}
+
+#[derive(Serialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskState {
+    Fresh,
+    Translating,
+    Completed,
+}
+
+#[derive(Serialize)]
+pub struct TaskStatus {
+    pub state: TaskState,
+    pub percent: f64,
 }
 
 #[derive(Serialize)]
@@ -25,6 +41,8 @@ pub struct RecentTask {
     pub video_path: String,
     pub file_name: String,
     pub modified_at: u64,
+    pub state: TaskState,
+    pub percent: f64,
 }
 
 pub struct AppState {
@@ -34,6 +52,7 @@ pub struct AppState {
     pub config: Arc<Mutex<AppConfig>>,
     pub pipeline: Arc<Mutex<Option<FilePipeline>>>,
     pub pipeline_progress: Arc<Mutex<Option<Arc<Mutex<f64>>>>>,
+    pub pipeline_phase: Arc<Mutex<Option<Arc<Mutex<pick_up_sound_text::pipeline::Phase>>>>>,
 }
 
 #[tauri::command]
@@ -54,6 +73,7 @@ pub async fn save_config(config: AppConfig, state: State<'_, AppState>) -> Resul
 pub async fn start_file_processing(
     video_path: String,
     source_language: String,
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     tracing::info!("start_file_processing called: video_path={}, source_language={}", video_path, source_language);
@@ -88,13 +108,27 @@ pub async fn start_file_processing(
         Box::new(asr_provider),
         Box::new(translate_provider),
         config.clone(),
-        source_language,
+        source_language.clone(),
     );
 
-    // Stable task_id from video path so re-processing the same file resumes
-    let task_id = format!("{:x}", md5ish(video_path.to_string_lossy().as_bytes()));
+    // Stable task_id（path+size+mtime）：同文件重跑续传，换文件天然隔离
+    let task_id = compute_task_id(&video_path).map_err(|e| e.to_string())?;
+
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("tasks");
+
+    let fingerprint = CheckpointFingerprint {
+        source_language: source_language.clone(),
+        target_lang: config.translate.target_lang.clone(),
+        translate_provider: config.translate.provider.clone(),
+        translate_model: config.translate.model.clone(),
+        asr_model: config.asr.file_model.clone(),
+    };
     pipeline
-        .init_checkpoint(task_id.clone(), video_path.clone())
+        .init_checkpoint_in(app_data_dir, task_id.clone(), video_path.clone(), fingerprint)
         .map_err(|e| e.to_string())?;
 
     // Get shared state handles
@@ -114,6 +148,11 @@ pub async fn start_file_processing(
     let mut pipeline_progress_guard = state.pipeline_progress.lock().await;
     *pipeline_progress_guard = Some(progress_handle);
     drop(pipeline_progress_guard);
+
+    let phase_handle = pipeline.phase_handle();
+    let mut pipeline_phase_guard = state.pipeline_phase.lock().await;
+    *pipeline_phase_guard = Some(phase_handle);
+    drop(pipeline_phase_guard);
 
     // Store pipeline reference
     let mut pipeline_guard = state.pipeline.lock().await;
@@ -139,20 +178,17 @@ pub async fn start_file_processing(
     Ok(task_id)
 }
 
-/// Simple non-cryptographic hash for task_id derivation (FNV-1a).
-fn md5ish(data: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for &b in data {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
-}
-
 #[tauri::command]
 pub async fn get_processing_progress(state: State<'_, AppState>) -> Result<ProgressInfo, String> {
-    let pipeline_state_guard = state.pipeline_state.lock().await;
+    let phase = {
+        let guard = state.pipeline_phase.lock().await;
+        match guard.as_ref() {
+            Some(h) => h.lock().await.as_str().to_string(),
+            None => "idle".to_string(),
+        }
+    };
 
+    let pipeline_state_guard = state.pipeline_state.lock().await;
     if let Some(state_handle) = pipeline_state_guard.as_ref() {
         let pipeline_state = state_handle.lock().await.clone();
         let progress_guard = state.pipeline_progress.lock().await;
@@ -174,12 +210,14 @@ pub async fn get_processing_progress(state: State<'_, AppState>) -> Result<Progr
             state: state_str.to_string(),
             progress,
             error,
+            phase,
         })
     } else {
         Ok(ProgressInfo {
             state: "idle".to_string(),
             progress: 0.0,
             error: None,
+            phase: "idle".to_string(),
         })
     }
 }
@@ -273,61 +311,107 @@ pub async fn test_translate_connection(config: AppConfig) -> Result<String, Stri
 }
 
 #[tauri::command]
-pub async fn list_recent_tasks() -> Result<Vec<RecentTask>, String> {
-    let tasks_dir = dirs::home_dir()
-        .ok_or_else(|| "Cannot find home directory".to_string())?
-        .join("Library/Application Support/pick-up-sound-text/tasks");
+pub async fn get_task_status(
+    video_path: String,
+    app: tauri::AppHandle,
+) -> Result<TaskStatus, String> {
+    let path = PathBuf::from(video_path);
+    let task_id = compute_task_id(&path).map_err(|e| e.to_string())?;
+    let cp_path = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("tasks")
+        .join(&task_id)
+        .join("progress.jsonl");
+
+    let cp = match Checkpoint::load(&cp_path).map_err(|e| e.to_string())? {
+        None => return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0 }),
+        Some(c) => c,
+    };
+    if cp.segments.is_empty() {
+        Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0 })
+    } else if cp.is_all_completed() {
+        Ok(TaskStatus { state: TaskState::Completed, percent: 1.0 })
+    } else {
+        Ok(TaskStatus { state: TaskState::Translating, percent: cp.percent() })
+    }
+}
+
+#[tauri::command]
+pub async fn list_recent_tasks(app: tauri::AppHandle) -> Result<Vec<RecentTask>, String> {
+    let tasks_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("tasks");
 
     if !tasks_dir.exists() {
         return Ok(Vec::new());
     }
 
-    let mut tasks: Vec<RecentTask> = Vec::new();
     let entries = std::fs::read_dir(&tasks_dir).map_err(|e| e.to_string())?;
+    let mut tasks: Vec<RecentTask> = Vec::new();
 
     for entry in entries.flatten() {
         let progress_file = entry.path().join("progress.jsonl");
-        if !progress_file.exists() {
-            continue;
-        }
-        let content = match std::fs::read_to_string(&progress_file) {
-            Ok(c) => c,
+        let modified_at = match std::fs::metadata(&progress_file).and_then(|m| m.modified()) {
+            Ok(t) => t
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
             Err(_) => continue,
         };
-        let first_line = match content.lines().next() {
-            Some(l) if !l.trim().is_empty() => l,
-            _ => continue,
-        };
-        let meta: serde_json::Value = match serde_json::from_str(first_line) {
-            Ok(v) => v,
+        let cp = match Checkpoint::load(&progress_file) {
+            Ok(Some(c)) => c,
+            Ok(None) => continue, // 无/已归档损坏文件
             Err(_) => continue,
         };
-        let video_path = meta["video_path"].as_str().unwrap_or("").to_string();
-        if video_path.is_empty() {
+        if cp.video_path.as_os_str().is_empty() {
             continue;
         }
+        let video_path = cp.video_path.to_string_lossy().to_string();
         let file_name = PathBuf::from(&video_path)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        let modified_at = std::fs::metadata(&progress_file)
-            .and_then(|m| m.modified())
-            .map(|t| {
-                t.duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-            })
-            .unwrap_or(0);
+
+        let (state, percent) = if cp.segments.is_empty() {
+            (TaskState::Fresh, 0.0)
+        } else if cp.is_all_completed() {
+            (TaskState::Completed, 1.0)
+        } else {
+            (TaskState::Translating, cp.percent())
+        };
 
         tasks.push(RecentTask {
-            task_id: meta["task_id"].as_str().unwrap_or("").to_string(),
+            task_id: cp.task_id,
             video_path,
             file_name,
             modified_at,
+            state,
+            percent,
         });
     }
 
-    tasks.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
-    tasks.truncate(8);
-    Ok(tasks)
+    // 同一视频多个 task_id（文件被替换过）只保留最新
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut deduped: Vec<RecentTask> = Vec::new();
+    for t in tasks {
+        match seen.get(&t.video_path) {
+            Some(&i) => {
+                if t.modified_at > deduped[i].modified_at {
+                    deduped[i] = t;
+                }
+            }
+            None => {
+                seen.insert(t.video_path.clone(), deduped.len());
+                deduped.push(t);
+            }
+        }
+    }
+
+    deduped.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+    deduped.truncate(8);
+    Ok(deduped)
 }
