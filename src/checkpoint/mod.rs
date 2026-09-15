@@ -211,7 +211,7 @@ pub fn compute_task_id(video_path: &Path) -> Result<String> {
         .unwrap_or(0);
 
     let mut hash: u64 = 0xcbf29ce484222325;
-    let mut feed = |bytes: &[u8], hash: &mut u64| {
+    let feed = |bytes: &[u8], hash: &mut u64| {
         for b in bytes {
             *hash ^= *b as u64;
             *hash = hash.wrapping_mul(0x100000001b3);

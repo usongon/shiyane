@@ -9,13 +9,33 @@ use tokio::sync::Mutex;
 
 use crate::asr::{AsrConfig, FileAsrProvider};
 use crate::audio::AudioSource;
-use crate::checkpoint::{Checkpoint, SegmentStatus};
+use crate::checkpoint::{Checkpoint, CheckpointFingerprint, SegmentProgress, SegmentStatus};
 use crate::config::AppConfig;
 use crate::error::Error;
 use crate::subtitle::{SubtitleEntry, SubtitleStatus};
 use crate::translate::{TranslateProvider, TranslateRequest};
 use crate::Result;
 use std::path::PathBuf;
+
+/// 管线阶段，供 UI 正确显示步骤（替代按百分比猜步骤的旧逻辑）
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Phase {
+    Extracting,
+    Transcribing,
+    Translating,
+    Done,
+}
+
+impl Phase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Phase::Extracting => "extracting",
+            Phase::Transcribing => "transcribing",
+            Phase::Translating => "translating",
+            Phase::Done => "done",
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PipelineState {
@@ -39,6 +59,7 @@ pub struct FilePipeline {
     total_segments: usize,
     completed_segments: usize,
     progress: Arc<Mutex<f64>>,
+    phase: Arc<Mutex<Phase>>,
 }
 
 impl FilePipeline {
@@ -62,27 +83,37 @@ impl FilePipeline {
             total_segments: 0,
             completed_segments: 0,
             progress: Arc::new(Mutex::new(0.0)),
+            phase: Arc::new(Mutex::new(Phase::Extracting)),
         }
     }
     
     /// Initialize checkpoint for resume from breakpoint
+    /// （旧入口：固定本机 tasks 目录，命令层过渡使用，Task 5 接线后移除）
     pub fn init_checkpoint(&mut self, task_id: String, video_path: PathBuf) -> Result<()> {
-        let checkpoint_dir = dirs::home_dir()
+        let dir = dirs::home_dir()
             .ok_or_else(|| Error::Config("Cannot find home directory".to_string()))?
-            .join("Library/Application Support/pick-up-sound-text/tasks")
-            .join(&task_id);
-        
+            .join("Library/Application Support/pick-up-sound-text/tasks");
+        self.init_checkpoint_in(dir, task_id, video_path, Default::default())
+    }
+
+    /// 初始化 checkpoint（目录可注入，供测试与 Tauri app_data_dir 使用）
+    pub fn init_checkpoint_in(
+        &mut self,
+        dir: PathBuf,
+        task_id: String,
+        video_path: PathBuf,
+        fingerprint: CheckpointFingerprint,
+    ) -> Result<()> {
+        let checkpoint_dir = dir.join(&task_id);
         std::fs::create_dir_all(&checkpoint_dir)?;
         let checkpoint_path = checkpoint_dir.join("progress.jsonl");
-        
+
         let checkpoint = match Checkpoint::load(&checkpoint_path)? {
             Some(c) => c,
-            None => Checkpoint::new(task_id, video_path, Default::default()),
+            None => Checkpoint::new(task_id, video_path, fingerprint),
         };
-        
         self.checkpoint = Some(checkpoint);
         self.checkpoint_path = Some(checkpoint_path);
-        
         Ok(())
     }
     
@@ -96,10 +127,22 @@ impl FilePipeline {
         self.progress.clone()
     }
 
+    pub fn phase_handle(&self) -> Arc<Mutex<Phase>> {
+        self.phase.clone()
+    }
+
+    pub async fn get_phase(&self) -> Phase {
+        *self.phase.lock().await
+    }
+
     pub async fn process(&mut self) -> Result<()> {
         let mut state = self.state.lock().await;
         *state = PipelineState::Processing;
         drop(state);
+
+        let mut phase = self.phase.lock().await;
+        *phase = Phase::Extracting;
+        drop(phase);
 
         // Duration limit: min(upstream transcription limit, 3h)
         const MAX_DURATION_SECS: f64 = 3.0 * 3600.0;
@@ -112,19 +155,6 @@ impl FilePipeline {
                 let mut state = self.state.lock().await;
                 *state = PipelineState::Failed(msg.clone());
                 return Err(Error::AudioSource(msg));
-            }
-        }
-
-        // Check if already completed via checkpoint
-        if let Some(checkpoint) = &self.checkpoint {
-            let completed = checkpoint
-                .segments
-                .iter()
-                .filter(|s| s.status == SegmentStatus::Completed)
-                .count();
-
-            if completed > 0 {
-                tracing::info!("Found {} completed segments in checkpoint, but file transcription is atomic - starting fresh", completed);
             }
         }
 
@@ -165,6 +195,10 @@ impl FilePipeline {
         };
 
         // Transcribe the complete audio file
+        let mut phase = self.phase.lock().await;
+        *phase = Phase::Transcribing;
+        drop(phase);
+
         tracing::info!("Starting file transcription with model: {}", asr_config.model);
         let transcription = match self.asr_provider.transcribe_file(&asr_config, &audio_path).await {
             Ok(result) => result,
@@ -184,7 +218,31 @@ impl FilePipeline {
             tracing::warn!("Failed to delete temp audio file {:?}: {}", audio_path, e);
         }
 
+        // 整批句子落盘为 Pending（断点续传的起点）
+        if let (Some(cp), Some(cp_path)) = (&mut self.checkpoint, &self.checkpoint_path) {
+            cp.segments = transcription
+                .sentences
+                .iter()
+                .enumerate()
+                .map(|(i, s)| SegmentProgress {
+                    segment_id: i,
+                    start_time: Some(s.begin_time),
+                    end_time: Some(s.end_time),
+                    status: SegmentStatus::Pending,
+                    source: Some(s.text.clone()),
+                    translated: None,
+                })
+                .collect();
+            if let Err(e) = cp.save(cp_path) {
+                tracing::warn!("checkpoint 写盘失败（不影响本次任务，但断点续传不可用）: {}", e);
+            }
+        }
+
         // Translate each sentence and create subtitle entries
+        let mut phase = self.phase.lock().await;
+        *phase = Phase::Translating;
+        drop(phase);
+
         let total_sentences = transcription.sentences.len();
         let mut entries = Vec::new();
         let mut previous_texts: Vec<String> = Vec::new();
@@ -227,7 +285,20 @@ impl FilePipeline {
             
             entries.push(entry);
             previous_texts.push(sentence.text.clone());
-            
+
+            // 逐句追加 Completed 更新行（O(1)，电影规模安全）
+            if let (Some(cp), Some(cp_path)) = (&mut self.checkpoint, &self.checkpoint_path) {
+                if let Some(seg) = cp.segments.get_mut(idx) {
+                    seg.status = SegmentStatus::Completed;
+                    seg.translated = Some(entries.last().unwrap().translated.clone());
+                    if let Err(e) =
+                        Checkpoint::append_updates(cp_path, std::slice::from_ref(seg))
+                    {
+                        tracing::warn!("checkpoint 追加失败（继续运行）: {}", e);
+                    }
+                }
+            }
+
             // Update progress
             let mut p = self.progress.lock().await;
             *p = (idx + 1) as f64 / total_sentences as f64;
@@ -244,7 +315,18 @@ impl FilePipeline {
         // Mark as completed
         let mut state = self.state.lock().await;
         *state = PipelineState::Completed;
-        
+
+        let mut phase = self.phase.lock().await;
+        *phase = Phase::Done;
+        drop(phase);
+
+        // 终态压缩：一行一句，防止多次续跑后文件膨胀
+        if let (Some(cp), Some(cp_path)) = (&self.checkpoint, &self.checkpoint_path) {
+            if let Err(e) = cp.save(cp_path) {
+                tracing::warn!("checkpoint 终态压缩失败（不影响结果）: {}", e);
+            }
+        }
+
         tracing::info!("Pipeline completed successfully");
 
         Ok(())

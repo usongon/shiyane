@@ -158,7 +158,7 @@ fn test_helpers() {
 
 #[test]
 fn test_task_id_stable_and_sensitive() -> std::io::Result<()> {
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime};
 
     let dir = tempfile::tempdir()?;
     let p = dir.path().join("video.mp4");
