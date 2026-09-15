@@ -11,6 +11,7 @@ async fn test_openai_provider_creation() {
         base_url: "https://api.openai.com/v1".to_string(),
         model: "gpt-3.5-turbo".to_string(),
         api_key: std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| "test_key".to_string()),
+        timeout_secs: 60,
     };
 
     let req = TranslateRequest {

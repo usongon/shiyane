@@ -14,6 +14,7 @@ async fn test_dashscope_provider_creation() {
         model: "paraformer-realtime-v2".to_string(),
         api_key: std::env::var("DASHSCOPE_API_KEY").unwrap_or_else(|_| "test_key".to_string()),
         language: "auto".to_string(),
+        workspace_id: None,
     };
 
     let stream = provider.start_stream(&config).await;
@@ -29,6 +30,7 @@ async fn test_dashscope_stream_placeholder_event() {
         model: "paraformer-realtime-v2".to_string(),
         api_key: std::env::var("DASHSCOPE_API_KEY").unwrap_or_else(|_| "test_key".to_string()),
         language: "auto".to_string(),
+        workspace_id: None,
     };
 
     let mut stream = provider.start_stream(&config).await.expect("start_stream");
