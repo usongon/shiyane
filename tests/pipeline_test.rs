@@ -1,4 +1,6 @@
-use pick_up_sound_text::asr::{AsrConfig, AsrEvent, AsrProvider, AsrStream};
+use pick_up_sound_text::asr::{
+    AsrConfig, FileAsrProvider, FileTranscriptionResult, TranscriptionSentence,
+};
 use pick_up_sound_text::audio::{AudioChunk, AudioSource};
 use pick_up_sound_text::config::AppConfig;
 use pick_up_sound_text::pipeline::{FilePipeline, PipelineState};
@@ -42,50 +44,32 @@ impl AudioSource for MockAudioSource {
     fn total_duration(&self) -> Option<Duration> {
         Some(Duration::from_secs(10))
     }
+
+    async fn extract_full_audio_to_wav(&self) -> Result<std::path::PathBuf> {
+        // 管线在 ASR 完成后会删除该文件，必须真实存在
+        let p = std::env::temp_dir().join("pipeline_test_mock_audio.wav");
+        std::fs::write(&p, b"RIFF").map_err(|e| Error::AudioSource(e.to_string()))?;
+        Ok(p)
+    }
 }
 
-// Mock ASR Provider
-struct MockAsrProvider;
+// Mock file transcription provider (submit → poll → download 的替身)
+struct MockFileAsrProvider;
 
 #[async_trait]
-impl AsrProvider for MockAsrProvider {
-    async fn start_stream(&self, _config: &AsrConfig) -> Result<Box<dyn AsrStream>> {
-        Ok(Box::new(MockAsrStream {
-            events: vec![
-                AsrEvent::Final {
-                    text: "hello world".to_string(),
-                    ts_start: 0.0,
-                    ts_end: 1.0,
-                },
-            ],
-            index: 0,
-        }))
-    }
-}
-
-struct MockAsrStream {
-    events: Vec<AsrEvent>,
-    index: usize,
-}
-
-#[async_trait]
-impl AsrStream for MockAsrStream {
-    async fn send_audio(&mut self, _pcm: &[i16]) -> Result<()> {
-        Ok(())
-    }
-
-    async fn next_event(&mut self) -> Result<AsrEvent> {
-        if self.index >= self.events.len() {
-            // Return EndOfStream to signal end of ASR stream
-            return Ok(AsrEvent::EndOfStream);
-        }
-        let event = self.events[self.index].clone();
-        self.index += 1;
-        Ok(event)
-    }
-
-    async fn finish(&mut self) -> Result<()> {
-        Ok(())
+impl FileAsrProvider for MockFileAsrProvider {
+    async fn transcribe_file(
+        &self,
+        _config: &AsrConfig,
+        _audio_path: &std::path::Path,
+    ) -> Result<FileTranscriptionResult> {
+        Ok(FileTranscriptionResult {
+            sentences: vec![TranscriptionSentence {
+                text: "hello world".to_string(),
+                begin_time: 0.0,
+                end_time: 1.0,
+            }],
+        })
     }
 }
 
@@ -107,24 +91,21 @@ impl TranslateProvider for MockTranslateProvider {
 
 #[tokio::test]
 async fn test_pipeline_state_transitions() {
-    // Test the state enum
     assert_eq!(PipelineState::Idle, PipelineState::Idle);
     assert_ne!(PipelineState::Idle, PipelineState::Processing);
 }
 
 #[tokio::test]
 async fn test_pipeline_process_with_mock() {
-    let chunks = vec![
-        AudioChunk {
-            pcm: vec![0i16; 1600],
-            content_time_ms: 0,
-            wall_time_ms: 1000,
-        },
-    ];
+    let chunks = vec![AudioChunk {
+        pcm: vec![0i16; 1600],
+        content_time_ms: 0,
+        wall_time_ms: 1000,
+    }];
 
     let mut pipeline = FilePipeline::new(
         Box::new(MockAudioSource::new(chunks)),
-        Box::new(MockAsrProvider),
+        Box::new(MockFileAsrProvider),
         Box::new(MockTranslateProvider),
         AppConfig::default(),
         "auto".to_string(),
@@ -132,12 +113,10 @@ async fn test_pipeline_process_with_mock() {
 
     assert_eq!(pipeline.get_state().await, PipelineState::Idle);
 
-    // Actually call process() and verify results
     let result = pipeline.process().await;
     assert!(result.is_ok());
     assert_eq!(pipeline.get_state().await, PipelineState::Completed);
 
-    // Verify entries were created
     let entries = pipeline.get_entries().await;
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].source, "hello world");
