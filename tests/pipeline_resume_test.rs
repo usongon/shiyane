@@ -274,6 +274,32 @@ async fn source_language_change_reruns_asr() {
 }
 
 #[tokio::test]
+async fn zero_sentence_asr_fails_clearly() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut p, _extract, _asr, calls) = build_pipeline(
+        dir.path(),
+        "t-zero",
+        fp("auto", "zh"),
+        sentences(0), // MockFileAsr 返回 0 句
+        None,
+        "zero",
+    );
+
+    let err = p.process().await.unwrap_err();
+    assert!(
+        err.to_string().contains("未识别到语音"),
+        "错误文案应含「未识别到语音」，实际: {err}"
+    );
+    match p.get_state().await {
+        pick_up_sound_text::pipeline::PipelineState::Failed(msg) => {
+            assert!(msg.contains("未识别到语音"), "Failed 文案: {msg}");
+        }
+        other => panic!("零句 ASR 应进入 Failed，实际: {other:?}"),
+    }
+    assert!(calls.lock().unwrap().is_empty(), "零句时不得调用翻译");
+}
+
+#[tokio::test]
 async fn resume_seeds_translation_context_from_checkpoint() {
     /// 记录每次翻译请求的 context（包一层 MockTranslate）
     struct CtxCapture {

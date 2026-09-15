@@ -159,9 +159,9 @@ export default function FilePage({ active }: { active: boolean }) {
         fileName: file.name,
         progress: {
           state: "idle",
-          progress: fileStatus?.percent ?? 0,
+          progress: fileStatus?.state === "translating" ? fileStatus.percent : 0,
           error: null,
-          phase: "extracting",
+          phase: fileStatus?.state === "translating" ? "translating" : "extracting",
         },
       });
       startPolling();

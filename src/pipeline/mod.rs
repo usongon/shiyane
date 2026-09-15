@@ -315,6 +315,16 @@ impl FilePipeline {
 
         // Translate each sentence and create subtitle entries
         let items = items.expect("items 必然已构造");
+
+        // 零句防线：ASR 返回 0 句时若放行，会形成「0 句假 Completed」且
+        // checkpoint 只有 meta（最近列表永远显示『未开始』），用户会反复重跑反复付费
+        if items.is_empty() {
+            let msg = "转写结果为空（未识别到语音），请检查视频音轨后重试".to_string();
+            let mut state = self.state.lock().await;
+            *state = PipelineState::Failed(msg.clone());
+            return Err(Error::Asr(msg));
+        }
+
         let total_sentences = items.len();
         let completed_before = items.iter().filter(|i| i.translated.is_some()).count();
 

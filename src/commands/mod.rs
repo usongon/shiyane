@@ -314,9 +314,17 @@ pub async fn test_translate_connection(config: AppConfig) -> Result<String, Stri
 pub async fn get_task_status(
     video_path: String,
     app: tauri::AppHandle,
+    state: State<'_, AppState>,
 ) -> Result<TaskStatus, String> {
     let path = PathBuf::from(video_path);
-    let task_id = compute_task_id(&path).map_err(|e| e.to_string())?;
+    let task_id = match compute_task_id(&path) {
+        Ok(id) => id,
+        // 文件不存在 = 无可续传任务，Fresh 语义更诚实（其余错误仍透传）
+        Err(pick_up_sound_text::Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0 })
+        }
+        Err(e) => return Err(e.to_string()),
+    };
     let cp_path = app
         .path()
         .app_data_dir()
@@ -329,6 +337,20 @@ pub async fn get_task_status(
         None => return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0 }),
         Some(c) => c,
     };
+
+    // 指纹感知：只比对可从当前 config 得知的 4 个字段（source_language 是
+    // 启动时的下拉选择，此处不可知，留给管线运行时校验）。任一不同 → Fresh，
+    // 不对用户承诺与实际不符的「继续处理 N%」
+    let config = state.config.lock().await.clone();
+    let fp = &cp.fingerprint;
+    if fp.target_lang != config.translate.target_lang
+        || fp.translate_provider != config.translate.provider
+        || fp.translate_model != config.translate.model
+        || fp.asr_model != config.asr.file_model
+    {
+        return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0 });
+    }
+
     if cp.segments.is_empty() {
         Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0 })
     } else if cp.is_all_completed() {
