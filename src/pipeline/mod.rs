@@ -75,10 +75,9 @@ impl FilePipeline {
         std::fs::create_dir_all(&checkpoint_dir)?;
         let checkpoint_path = checkpoint_dir.join("progress.jsonl");
         
-        let checkpoint = if checkpoint_path.exists() {
-            Checkpoint::load(&checkpoint_path)?
-        } else {
-            Checkpoint::new(task_id, video_path)
+        let checkpoint = match Checkpoint::load(&checkpoint_path)? {
+            Some(c) => c,
+            None => Checkpoint::new(task_id, video_path, Default::default()),
         };
         
         self.checkpoint = Some(checkpoint);
