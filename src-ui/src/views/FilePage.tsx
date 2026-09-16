@@ -412,6 +412,15 @@ export default function FilePage({ active }: { active: boolean }) {
       ) : (
         <>
           <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+            <Tooltip title="返回主页">
+              <Button
+                type="text"
+                icon={<ArrowLeftOutlined />}
+                onClick={onBack}
+                disabled={taskRunning}
+                aria-label="返回主页"
+              />
+            </Tooltip>
             <div
               style={{
                 width: 38,
@@ -443,22 +452,16 @@ export default function FilePage({ active }: { active: boolean }) {
                 {file.path}
               </div>
             </div>
-            <Button
-              icon={<ArrowLeftOutlined />}
-              onClick={onBack}
-              disabled={taskRunning}
-            >
-              返回
-            </Button>
-            <Tooltip title="重新选择文件">
-              <Button
-                type="text"
-                icon={<ReloadOutlined />}
-                onClick={onPickFile}
-                disabled={taskRunning}
-                aria-label="重新选择文件"
-              />
-            </Tooltip>
+            {!taskRunning && (
+              <Tooltip title="重新选择文件">
+                <Button
+                  type="text"
+                  icon={<ReloadOutlined />}
+                  onClick={onPickFile}
+                  aria-label="重新选择文件"
+                />
+              </Tooltip>
+            )}
             <Select
               value={language}
               onChange={setLanguage}
@@ -468,25 +471,40 @@ export default function FilePage({ active }: { active: boolean }) {
               disabled={taskRunning}
             />
             {!taskRunning && fileStatus?.state === "translating" && (
-              <Button danger type="text" icon={<DeleteOutlined />} onClick={onStop}>
-                清除进度
-              </Button>
+              <Tooltip title="清除进度（不可恢复）">
+                <Button
+                  danger
+                  type="text"
+                  icon={<DeleteOutlined />}
+                  onClick={onStop}
+                  aria-label="清除进度"
+                />
+              </Tooltip>
             )}
-            <Button
-              type="primary"
-              icon={<PlayCircleOutlined />}
-              loading={starting}
-              disabled={taskRunning}
-              onClick={onStart}
-            >
-              {task && done
-                ? "重新处理"
-                : fileStatus?.state === "translating"
-                  ? `继续处理（${Math.round((fileStatus.percent ?? 0) * 100)}%）`
-                  : fileStatus?.state === "completed"
+            {!taskRunning && (
+              <Tooltip
+                title={
+                  fileStatus?.state === "translating"
+                    ? `继续处理（${Math.round((fileStatus.percent ?? 0) * 100)}%），从断点继续`
+                    : null
+                }
+              >
+                <Button
+                  type="primary"
+                  icon={<PlayCircleOutlined />}
+                  loading={starting}
+                  onClick={onStart}
+                >
+                  {task && done
                     ? "重新处理"
-                    : "开始转字幕"}
-            </Button>
+                    : fileStatus?.state === "translating"
+                      ? `${Math.round((fileStatus.percent ?? 0) * 100)}%`
+                      : fileStatus?.state === "completed"
+                        ? "重新处理"
+                        : "开始转字幕"}
+                </Button>
+              </Tooltip>
+            )}
           </div>
 
           {task && (
@@ -546,7 +564,7 @@ export default function FilePage({ active }: { active: boolean }) {
                     "正在准备…"
                   ) : task.progress.state === "paused" ? (
                     fileStatus?.state === "translating" ? (
-                      "已暂停，可点击「继续处理」继续"
+                      "已暂停，进度已保留，可随时继续"
                     ) : (
                       "已暂停，本次转写未保留，继续将重新上传并转写"
                     )
