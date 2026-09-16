@@ -466,21 +466,10 @@ export default function FilePage({ active }: { active: boolean }) {
               value={language}
               onChange={setLanguage}
               options={LANGUAGES}
-              style={{ width: 88 }}
+              style={{ width: 72 }}
               aria-label="视频语言"
               disabled={taskRunning}
             />
-            {!taskRunning && fileStatus?.state === "translating" && (
-              <Tooltip title="清除进度（不可恢复）">
-                <Button
-                  danger
-                  type="text"
-                  icon={<DeleteOutlined />}
-                  onClick={onStop}
-                  aria-label="清除进度"
-                />
-              </Tooltip>
-            )}
             {!taskRunning && (
               <Tooltip
                 title={
@@ -503,6 +492,17 @@ export default function FilePage({ active }: { active: boolean }) {
                         ? "重新处理"
                         : "开始转字幕"}
                 </Button>
+              </Tooltip>
+            )}
+            {!taskRunning && fileStatus?.state === "translating" && (
+              <Tooltip title="清除进度（不可恢复）">
+                <Button
+                  danger
+                  type="text"
+                  icon={<DeleteOutlined />}
+                  onClick={onStop}
+                  aria-label="清除进度"
+                />
               </Tooltip>
             )}
           </div>
