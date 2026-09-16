@@ -583,3 +583,5 @@ mod tests {
         assert_eq!(dedup_overlap("Hello World", "world again", 10), " again");
     }
 }
+
+pub mod realtime;
