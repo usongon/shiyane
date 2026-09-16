@@ -165,6 +165,24 @@ export default function FilePage({ active }: { active: boolean }) {
     };
   }, [backend, selectFile]);
 
+  const onDeleteRecent = (rt: RecentTask) => {
+    modal.confirm({
+      title: "删除该任务？",
+      content: `将删除「${rt.file_name}」的处理记录与进度，不可恢复。`,
+      okText: "删除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: async () => {
+        try {
+          await backend.stopFileProcessing(rt.video_path);
+          setRecentTasks((prev) => prev.filter((t) => t.task_id !== rt.task_id));
+        } catch (e) {
+          message.error(`删除失败：${e}`);
+        }
+      },
+    });
+  };
+
   const onPickFile = async () => {
     try {
       const path = await backend.pickVideoFile();
@@ -404,6 +422,20 @@ export default function FilePage({ active }: { active: boolean }) {
                         ? `翻译中断 · ${Math.round(rt.percent * 100)}%`
                         : "未开始"}
                   </span>
+                  <Tooltip title="删除该任务">
+                    <Button
+                      className="recent-del"
+                      type="text"
+                      danger
+                      size="small"
+                      icon={<DeleteOutlined />}
+                      aria-label={`删除 ${rt.file_name}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDeleteRecent(rt);
+                      }}
+                    />
+                  </Tooltip>
                 </div>
               ))}
             </div>

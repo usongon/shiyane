@@ -28,6 +28,7 @@ let config: AppConfig = {
 
 let progress: ProgressInfo = { state: "idle", progress: 0, error: null, phase: "idle" };
 let timer: number | null = null;
+const deletedVideoPaths = new Set<string>();
 
 function stopTimer() {
   if (timer !== null) {
@@ -79,10 +80,11 @@ export const mockBackend: Backend = {
       progress = { ...progress, state: "paused" };
     }
   },
-  async stopFileProcessing(_videoPath) {
+  async stopFileProcessing(videoPath) {
     await delay(300);
     stopTimer();
     progress = { state: "idle", progress: 0, error: null, phase: "idle" };
+    deletedVideoPaths.add(videoPath);
   },
   async getProcessingProgress() {
     return { ...progress };
@@ -102,7 +104,7 @@ export const mockBackend: Backend = {
   async listRecentTasks(): Promise<RecentTask[]> {
     await delay(300);
     const now = Math.floor(Date.now() / 1000);
-    return [
+    const tasks: RecentTask[] = [
       {
         task_id: "a1b2c3",
         video_path: "/Users/demo/Movies/tears_of_steel_1080p.mp4",
@@ -128,6 +130,7 @@ export const mockBackend: Backend = {
         percent: 0,
       },
     ];
+    return tasks.filter((t) => !deletedVideoPaths.has(t.video_path));
   },
   async getTaskStatus(videoPath) {
     await delay(200);
