@@ -26,12 +26,17 @@ A cross-platform desktop app that turns video files into translated subtitles. D
 
 ## Prerequisites
 
-- [ffmpeg](https://ffmpeg.org/) and ffprobe on `PATH`
-  - macOS: `brew install ffmpeg`
-  - Ubuntu: `sudo apt install ffmpeg`
-  - Windows: download from https://ffmpeg.org/download.html
+Users who install the release build need nothing else — the macOS bundle ships with
+ffmpeg/ffprobe included. You only need:
+
 - A [Bailian](https://bailian.console.aliyun.com/) API key (Beijing region)
 - An Alibaba Cloud [OSS](https://oss.console.aliyun.com/) bucket (private is fine) with a RAM AccessKey that can read/write it
+
+When building from source without bundling the binaries (see below), install ffmpeg yourself:
+
+- macOS: `brew install ffmpeg`
+- Ubuntu: `sudo apt install ffmpeg`
+- Windows: download from https://ffmpeg.org/download.html
 
 ## Build from source
 
@@ -45,10 +50,14 @@ cargo install tauri-cli
 # Clone and build
 git clone https://github.com/usongon/shiyane.git
 cd shiyane
-cargo tauri build   # installs frontend deps in src-ui/ and builds it automatically
+./scripts/build-ffmpeg.sh   # optional: produce the bundled ffmpeg/ffprobe (macOS arm64, LGPL)
+cargo tauri build           # installs frontend deps in src-ui/ and builds it automatically
 ```
 
-The built app is in `target/release/bundle/`.
+Building without running `build-ffmpeg.sh` also works — the app then falls back to an
+ffmpeg found on the system PATH.
+
+The built app is in `target/release/bundle/`. Third-party licenses: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Development
 

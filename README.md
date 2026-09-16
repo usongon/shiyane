@@ -26,18 +26,24 @@
 
 ## 前置要求
 
-- 安装 **ffmpeg** 和 **ffprobe** 并加入 `PATH`
-  ```bash
-  # macOS
-  brew install ffmpeg
+下载安装包的用户**开箱即用**——macOS 发行包已内置 ffmpeg/ffprobe，无需额外安装。
 
-  # Ubuntu
-  sudo apt install ffmpeg
+只需准备：
 
-  # Windows：从 https://ffmpeg.org/download.html 下载
-  ```
 - 一个[百炼](https://bailian.console.aliyun.com/) API Key（北京区域）
 - 一个阿里云 [OSS](https://oss.console.aliyun.com/) Bucket（私有即可）及具有读写权限的 RAM AccessKey
+
+从源码构建时，若未将内置二进制打包（见下），需自行安装 ffmpeg：
+
+```bash
+# macOS
+brew install ffmpeg
+
+# Ubuntu
+sudo apt install ffmpeg
+
+# Windows：从 https://ffmpeg.org/download.html 下载
+```
 
 ## 从源码构建
 
@@ -51,10 +57,13 @@ cargo install tauri-cli
 # 克隆并构建
 git clone https://github.com/usongon/shiyane.git
 cd shiyane
-cargo tauri build   # 会自动在 src-ui/ 安装依赖并构建前端
+./scripts/build-ffmpeg.sh   # 可选：生成捆绑用的 ffmpeg/ffprobe（macOS arm64，LGPL）
+cargo tauri build           # 会自动在 src-ui/ 安装依赖并构建前端
 ```
 
-构建产物在 `target/release/bundle/` 目录下。
+不运行 `build-ffmpeg.sh` 也可构建，此时应用回落到系统 PATH 中的 ffmpeg。
+
+构建产物在 `target/release/bundle/` 目录下。第三方组件许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ## 开发模式
 

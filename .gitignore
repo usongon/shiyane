@@ -24,3 +24,6 @@ icons/android/
 # Build/tool caches
 src-ui/.vite/
 .playwright-cli/
+
+# 捆绑的 ffmpeg/ffprobe（LGPL 自建产物，38MB；可用 scripts/build-ffmpeg.sh 重建）
+/binaries/

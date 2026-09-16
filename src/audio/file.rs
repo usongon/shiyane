@@ -15,6 +15,45 @@ fn temp_wav_path(video_path: &Path) -> PathBuf {
     std::env::temp_dir().join(format!("shiyane-{:x}.wav", hasher.finish()))
 }
 
+/// ffmpeg/ffprobe 解析顺序：.app 内自带（externalBin）→ 常见安装目录 →
+/// 裸名交给 PATH。GUI 启动的进程只拿 launchd 最小 PATH，finder 双击也必须可用
+fn resolve_tool_in(bundled_dir: &Path, name: &str, extra_dirs: &[PathBuf]) -> PathBuf {
+    let bundled = bundled_dir.join(name);
+    if bundled.is_file() {
+        return bundled;
+    }
+    for dir in extra_dirs {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    PathBuf::from(name)
+}
+
+fn resolve_tool(name: &str) -> PathBuf {
+    let extra_dirs = ["/opt/homebrew/bin", "/usr/local/bin"]
+        .iter()
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    let bundled_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("/nonexistent"));
+    resolve_tool_in(&bundled_dir, name, &extra_dirs)
+}
+
+/// 子进程启动失败的友好映射：NotFound 给出安装指引，其余透传原因
+fn tool_spawn_error(tool: &str, e: std::io::Error) -> Error {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        Error::AudioSource(format!(
+            "未检测到 {tool}。请安装后重试：brew install ffmpeg"
+        ))
+    } else {
+        Error::AudioSource(format!("{tool} 执行失败: {e}"))
+    }
+}
+
 /// Audio source that extracts audio from a video file using ffmpeg.
 ///
 /// Segments the file into 10-minute chunks with 5-second overlap.
@@ -47,7 +86,7 @@ impl FileAudioSource {
             .to_str()
             .ok_or_else(|| Error::AudioSource("Path contains invalid UTF-8".to_string()))?;
 
-        let output = Command::new("ffprobe")
+        let output = Command::new(resolve_tool("ffprobe"))
             .kill_on_drop(true)
             .args(&[
                 "-v",
@@ -59,7 +98,8 @@ impl FileAudioSource {
                 path_str,
             ])
             .output()
-            .await?;
+            .await
+            .map_err(|e| tool_spawn_error("ffprobe", e))?;
 
         if !output.status.success() {
             return Err(Error::AudioSource(format!(
@@ -83,7 +123,7 @@ impl FileAudioSource {
             .to_str()
             .ok_or_else(|| Error::AudioSource("Path contains invalid UTF-8".to_string()))?;
 
-        let output = Command::new("ffmpeg")
+        let output = Command::new(resolve_tool("ffmpeg"))
             .kill_on_drop(true)
             .args(&[
                 "-ss",
@@ -180,7 +220,7 @@ impl AudioSource for FileAudioSource {
         // Create temp file path（确定性命名：暂停遗留的半截文件被 -y 覆盖）
         let temp_file = temp_wav_path(&self.video_path);
 
-        let output = Command::new("ffmpeg")
+        let output = Command::new(resolve_tool("ffmpeg"))
             .kill_on_drop(true)
             .args(&[
                 "-i",
@@ -228,5 +268,32 @@ mod tests {
             .to_str()
             .unwrap()
             .starts_with("shiyane-"));
+    }
+
+    #[test]
+    fn resolve_tool_prefers_bundled_then_common_dirs_then_path() {
+        let bundled = tempfile::tempdir().unwrap();
+        let homebrew = tempfile::tempdir().unwrap();
+        let empty = tempfile::tempdir().unwrap();
+
+        // bundle 内存在 → 直接用自带
+        std::fs::write(bundled.path().join("ffmpeg"), b"x").unwrap();
+        std::fs::write(homebrew.path().join("ffmpeg"), b"x").unwrap();
+        assert_eq!(
+            resolve_tool_in(bundled.path(), "ffmpeg", &[homebrew.path().to_path_buf()]),
+            bundled.path().join("ffmpeg")
+        );
+
+        // bundle 内没有 → 常见安装目录
+        assert_eq!(
+            resolve_tool_in(empty.path(), "ffmpeg", &[homebrew.path().to_path_buf()]),
+            homebrew.path().join("ffmpeg")
+        );
+
+        // 都没有 → 裸名（交给 PATH）
+        assert_eq!(
+            resolve_tool_in(empty.path(), "ffmpeg", &[empty.path().to_path_buf()]),
+            PathBuf::from("ffmpeg")
+        );
     }
 }
