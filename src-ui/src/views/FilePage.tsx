@@ -27,7 +27,7 @@ import type { PipelineStateName, ProgressInfo, RecentTask, TaskStatus } from "..
 import { PRIMARY } from "../theme";
 
 const LANGUAGES = [
-  { value: "auto", label: "自动识别" },
+  { value: "auto", label: "自动" },
   { value: "zh", label: "中文" },
   { value: "en", label: "英文" },
   { value: "ja", label: "日文" },
@@ -411,7 +411,7 @@ export default function FilePage({ active }: { active: boolean }) {
         </>
       ) : (
         <>
-          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <Tooltip title="返回主页">
               <Button
                 type="text"
@@ -466,7 +466,7 @@ export default function FilePage({ active }: { active: boolean }) {
               value={language}
               onChange={setLanguage}
               options={LANGUAGES}
-              style={{ width: 118 }}
+              style={{ width: 88 }}
               aria-label="视频语言"
               disabled={taskRunning}
             />
