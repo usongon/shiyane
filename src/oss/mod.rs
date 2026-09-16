@@ -5,8 +5,13 @@ use hmac::{Hmac, Mac};
 use reqwest::Client;
 use sha1::Sha1;
 use std::path::Path;
+use tokio::time::Duration;
 
 type HmacSha1 = Hmac<Sha1>;
+
+/// 上传瞬时网络故障的保守重试（本地代理抖动是已知模式），与翻译路径同参
+const MAX_ATTEMPTS: u32 = 3;
+const RETRY_BACKOFF_SECS: [u64; 2] = [2, 5];
 
 pub struct OssUploader {
     config: OssConfig,
@@ -61,18 +66,37 @@ impl OssUploader {
             self.config.access_key_id, signature
         );
 
-        // Upload file
-        let response = self
-            .client
-            .put(&url)
-            .header("Authorization", auth_header.clone())
-            .header("Content-Type", content_type)
-            .header("Content-MD5", content_md5.clone())
-            .header("Date", date.clone())
-            .body(file_bytes)
-            .send()
-            .await
-            .map_err(|e| Error::Config(format!("OSS upload failed: {}", e)))?;
+        // Upload file（瞬时网络故障重试：连接被断/代理抖动；PUT 幂等可安全重发）
+        let mut attempt = 1u32;
+        let response = loop {
+            match self
+                .client
+                .put(&url)
+                .header("Authorization", auth_header.clone())
+                .header("Content-Type", content_type)
+                .header("Content-MD5", content_md5.clone())
+                .header("Date", date.clone())
+                .body(file_bytes.clone())
+                .send()
+                .await
+            {
+                Ok(resp) => break resp,
+                Err(e) if attempt < MAX_ATTEMPTS => {
+                    tracing::warn!(
+                        "OSS 上传失败（第 {}/{} 次）: {} — {}s 后重试",
+                        attempt, MAX_ATTEMPTS, e, RETRY_BACKOFF_SECS[(attempt - 1) as usize]
+                    );
+                    tokio::time::sleep(Duration::from_secs(RETRY_BACKOFF_SECS[(attempt - 1) as usize])).await;
+                    attempt += 1;
+                }
+                Err(e) => {
+                    return Err(Error::Asr(format!(
+                        "OSS upload failed after {} attempts: {}",
+                        attempt, e
+                    )));
+                }
+            }
+        };
 
         let status = response.status();
         let headers = response.headers().clone();
@@ -190,5 +214,37 @@ impl OssUploader {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    // 瞬时网络故障必须重试：bucket 前缀使 URL 主机名不可解析，
+    // 每次尝试即刻失败——重试次数与退避时长由此可被确定性断言
+    #[tokio::test]
+    async fn upload_retries_transient_network_failures() {
+        let uploader = OssUploader::new(OssConfig {
+            endpoint: "127.0.0.1:1".to_string(),
+            bucket: "test-bucket".to_string(),
+            access_key_id: "ak".to_string(),
+            access_key_secret: "sk".to_string(),
+            path_prefix: None,
+        });
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"RIFF").unwrap();
+
+        let start = std::time::Instant::now();
+        let err = uploader.upload_file(tmp.path(), "obj.wav").await.unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("after 3 attempts"),
+            "应重试满 3 次后再报错，实际: {msg}"
+        );
+        assert!(start.elapsed() >= Duration::from_secs(7), "2s+5s 退避必须发生");
+        assert!(start.elapsed() < Duration::from_secs(30));
     }
 }
