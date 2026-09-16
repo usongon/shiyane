@@ -57,6 +57,8 @@ export interface RecentTask {
 export interface TaskStatus {
   state: RecentTaskState;
   percent: number;
+  /** checkpoint 记录的源语言，仅 translating/completed 返回 */
+  source_language?: string;
 }
 
 export function basename(path: string): string {

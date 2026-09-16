@@ -119,8 +119,10 @@ export const mockBackend: Backend = {
   },
   async getTaskStatus(videoPath) {
     await delay(200);
-    if (videoPath.includes("tears_of_steel")) return { state: "completed", percent: 1 };
-    if (videoPath.includes("product_demo")) return { state: "translating", percent: 0.45 };
+    if (videoPath.includes("tears_of_steel"))
+      return { state: "completed", percent: 1, source_language: "en" };
+    if (videoPath.includes("product_demo"))
+      return { state: "translating", percent: 0.45, source_language: "ja" };
     return { state: "fresh", percent: 0 };
   },
   async pickVideoFile() {

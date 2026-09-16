@@ -33,6 +33,10 @@ pub enum TaskState {
 pub struct TaskStatus {
     pub state: TaskState,
     pub percent: f64,
+    /// checkpoint 记录的源语言；仅 translating/completed 有值。
+    /// 前端用它把语言下拉自动选回原值，避免「点了继续却因语言不同全量重跑」。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_language: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -321,7 +325,7 @@ pub async fn get_task_status(
         Ok(id) => id,
         // 文件不存在 = 无可续传任务，Fresh 语义更诚实（其余错误仍透传）
         Err(pick_up_sound_text::Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0 })
+            return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0, source_language: None })
         }
         Err(e) => return Err(e.to_string()),
     };
@@ -334,12 +338,14 @@ pub async fn get_task_status(
         .join("progress.jsonl");
 
     let cp = match Checkpoint::load(&cp_path).map_err(|e| e.to_string())? {
-        None => return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0 }),
+        None => {
+            return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0, source_language: None })
+        }
         Some(c) => c,
     };
 
-    // 指纹感知：只比对可从当前 config 得知的 4 个字段（source_language 是
-    // 启动时的下拉选择，此处不可知，留给管线运行时校验）。任一不同 → Fresh，
+    // 指纹感知：只比对可从当前 config 得知的 4 个字段（source_language 交给
+    // 前端自动选回 + 按钮守卫，运行时管线做最终校验）。任一不同 → Fresh，
     // 不对用户承诺与实际不符的「继续处理 N%」
     let config = state.config.lock().await.clone();
     let fp = &cp.fingerprint;
@@ -348,15 +354,23 @@ pub async fn get_task_status(
         || fp.translate_model != config.translate.model
         || fp.asr_model != config.asr.file_model
     {
-        return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0 });
+        return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0, source_language: None });
     }
 
     if cp.segments.is_empty() {
-        Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0 })
+        Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0, source_language: None })
     } else if cp.is_all_completed() {
-        Ok(TaskStatus { state: TaskState::Completed, percent: 1.0 })
+        Ok(TaskStatus {
+            state: TaskState::Completed,
+            percent: 1.0,
+            source_language: Some(cp.fingerprint.source_language.clone()),
+        })
     } else {
-        Ok(TaskStatus { state: TaskState::Translating, percent: cp.percent() })
+        Ok(TaskStatus {
+            state: TaskState::Translating,
+            percent: cp.percent(),
+            source_language: Some(cp.fingerprint.source_language.clone()),
+        })
     }
 }
 

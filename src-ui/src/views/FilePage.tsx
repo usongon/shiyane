@@ -104,7 +104,14 @@ export default function FilePage({ active }: { active: boolean }) {
       setFileStatus(null);
       backend
         .getTaskStatus(path)
-        .then(setFileStatus)
+        .then((status) => {
+          setFileStatus(status);
+          // 可续传/已完成任务自动选回 checkpoint 记录的源语言——
+          // 语言不符会触发全量重跑而不是续传
+          if (status.state !== "fresh" && status.source_language) {
+            setLanguage(status.source_language);
+          }
+        })
         .catch(() => setFileStatus(null));
     },
     [backend],
@@ -197,6 +204,11 @@ export default function FilePage({ active }: { active: boolean }) {
     task !== null &&
     (task.progress.state === "completed" || task.progress.state === "exported");
   const failed = task !== null && task.progress.state === "failed";
+  // 可续传任务的语言被手动改过 → 续传失效，退回全量重跑语义
+  const langChanged =
+    fileStatus?.state === "translating" &&
+    !!fileStatus.source_language &&
+    fileStatus.source_language !== language;
 
   const phase = task?.progress.phase ?? "idle";
   const stepIndex = !task
@@ -345,11 +357,13 @@ export default function FilePage({ active }: { active: boolean }) {
             >
               {task && done
                 ? "重新处理"
-                : fileStatus?.state === "translating"
-                  ? `继续处理（${Math.round((fileStatus.percent ?? 0) * 100)}%）`
-                  : fileStatus?.state === "completed"
-                    ? "重新处理"
-                    : "开始转字幕"}
+                : langChanged
+                  ? "开始转字幕（语言已改，将全量重跑）"
+                  : fileStatus?.state === "translating"
+                    ? `继续处理（${Math.round((fileStatus.percent ?? 0) * 100)}%）`
+                    : fileStatus?.state === "completed"
+                      ? "重新处理"
+                      : "开始转字幕"}
             </Button>
           </div>
 
