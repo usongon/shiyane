@@ -16,6 +16,8 @@ export interface Backend {
   getConfig(): Promise<AppConfig>;
   saveConfig(config: AppConfig): Promise<void>;
   startFileProcessing(videoPath: string, sourceLanguage: string): Promise<string>;
+  pauseFileProcessing(): Promise<void>;
+  stopFileProcessing(videoPath: string): Promise<void>;
   getProcessingProgress(): Promise<ProgressInfo>;
   exportSubtitle(format: "srt" | "vtt"): Promise<string>;
   testAsrConnection(config: AppConfig): Promise<string>;
@@ -37,6 +39,9 @@ const tauriBackend: Backend = {
   saveConfig: (config) => invoke<void>("save_config", { config }),
   startFileProcessing: (videoPath, sourceLanguage) =>
     invoke<string>("start_file_processing", { videoPath, sourceLanguage }),
+  pauseFileProcessing: () => invoke<void>("pause_file_processing"),
+  stopFileProcessing: (videoPath) =>
+    invoke<void>("stop_file_processing", { videoPath }),
   getProcessingProgress: () => invoke<ProgressInfo>("get_processing_progress"),
   exportSubtitle: (format) => invoke<string>("export_subtitle", { format }),
   testAsrConnection: (config) => invoke<string>("test_asr_connection", { config }),

@@ -72,6 +72,18 @@ export const mockBackend: Backend = {
     }, 400);
     return "demo-task";
   },
+  async pauseFileProcessing() {
+    await delay(300);
+    stopTimer();
+    if (progress.state === "processing" || progress.state === "idle") {
+      progress = { ...progress, state: "paused" };
+    }
+  },
+  async stopFileProcessing(_videoPath) {
+    await delay(300);
+    stopTimer();
+    progress = { state: "idle", progress: 0, error: null, phase: "idle" };
+  },
   async getProcessingProgress() {
     return { ...progress };
   },

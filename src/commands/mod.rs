@@ -12,6 +12,7 @@ use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Serialize)]
 pub struct ProgressInfo {
@@ -57,6 +58,9 @@ pub struct AppState {
     pub pipeline: Arc<Mutex<Option<FilePipeline>>>,
     pub pipeline_progress: Arc<Mutex<Option<Arc<Mutex<f64>>>>>,
     pub pipeline_phase: Arc<Mutex<Option<Arc<Mutex<pick_up_sound_text::pipeline::Phase>>>>>,
+    /// 当前运行任务的取消句柄与视频路径（暂停/停止用；无运行任务时为 None）
+    pub cancel_token: Arc<Mutex<Option<CancellationToken>>>,
+    pub running_video_path: Arc<Mutex<Option<String>>>,
 }
 
 #[tauri::command]
@@ -158,6 +162,16 @@ pub async fn start_file_processing(
     *pipeline_phase_guard = Some(phase_handle);
     drop(pipeline_phase_guard);
 
+    // 登记取消句柄与运行路径（先于 spawn，杜绝暂停/停止竞态）
+    let cancel_handle = pipeline.cancel_handle();
+    let mut cancel_guard = state.cancel_token.lock().await;
+    *cancel_guard = Some(cancel_handle);
+    drop(cancel_guard);
+
+    let mut running_guard = state.running_video_path.lock().await;
+    *running_guard = Some(video_path.to_string_lossy().to_string());
+    drop(running_guard);
+
     // Store pipeline reference
     let mut pipeline_guard = state.pipeline.lock().await;
     *pipeline_guard = Some(pipeline);
@@ -205,6 +219,7 @@ pub async fn get_processing_progress(state: State<'_, AppState>) -> Result<Progr
         let (state_str, progress, error) = match pipeline_state {
             PipelineState::Idle => ("idle", progress_value, None),
             PipelineState::Processing => ("processing", progress_value, None),
+            PipelineState::Paused => ("paused", progress_value, None),
             PipelineState::Completed => ("completed", 1.0, None),
             PipelineState::Exported => ("exported", 1.0, None),
             PipelineState::Failed(err) => ("failed", progress_value, Some(err)),
@@ -224,6 +239,62 @@ pub async fn get_processing_progress(state: State<'_, AppState>) -> Result<Progr
             phase: "idle".to_string(),
         })
     }
+}
+
+#[tauri::command]
+pub async fn pause_file_processing(state: State<'_, AppState>) -> Result<(), String> {
+    let token = state.cancel_token.lock().await.clone();
+    if let Some(t) = token.as_ref() {
+        t.cancel();
+    }
+    // 等待管线退出，保证返回时状态已定格为 Paused（无运行任务则瞬时返回）
+    let handle = state.processing_task.lock().await.take();
+    if let Some(h) = handle {
+        let _ = h.await;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn stop_file_processing(
+    video_path: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let running = state.running_video_path.lock().await.clone();
+    let was_running = running.as_deref() == Some(video_path.as_str());
+
+    if was_running {
+        let token = state.cancel_token.lock().await.clone();
+        if let Some(t) = token.as_ref() {
+            t.cancel();
+        }
+        let handle = state.processing_task.lock().await.take();
+        if let Some(h) = handle {
+            let _ = h.await;
+        }
+        // 清空运行句柄：进度查询回到 idle/0，进度面板不再引用已作废的管线
+        *state.pipeline_state.lock().await = None;
+        *state.pipeline_entries.lock().await = None;
+        *state.pipeline_progress.lock().await = None;
+        *state.pipeline_phase.lock().await = None;
+        *state.cancel_token.lock().await = None;
+        *state.running_video_path.lock().await = None;
+    }
+
+    // 归零：删除该文件的整个 checkpoint 目录（运行中与未运行同样适用）
+    let path = PathBuf::from(&video_path);
+    let task_id = compute_task_id(&path).map_err(|e| e.to_string())?;
+    let task_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("tasks")
+        .join(&task_id);
+    if task_dir.exists() {
+        std::fs::remove_dir_all(&task_dir).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 #[tauri::command]

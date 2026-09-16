@@ -2,8 +2,8 @@ mod commands;
 
 use commands::{
     export_subtitle, get_config, get_processing_progress, get_task_status, list_recent_tasks,
-    save_config, start_file_processing, test_asr_connection, test_translate_connection,
-    AppState,
+    pause_file_processing, save_config, start_file_processing, stop_file_processing,
+    test_asr_connection, test_translate_connection, AppState,
 };
 use pick_up_sound_text::config::AppConfig;
 use std::sync::Arc;
@@ -27,6 +27,8 @@ fn main() {
         pipeline: Arc::new(Mutex::new(None)),
         pipeline_progress: Arc::new(Mutex::new(None)),
         pipeline_phase: Arc::new(Mutex::new(None)),
+        cancel_token: Arc::new(Mutex::new(None)),
+        running_video_path: Arc::new(Mutex::new(None)),
     };
 
     tauri::Builder::default()
@@ -34,6 +36,8 @@ fn main() {
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             start_file_processing,
+            pause_file_processing,
+            stop_file_processing,
             get_processing_progress,
             export_subtitle,
             get_config,

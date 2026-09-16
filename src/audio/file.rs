@@ -1,10 +1,19 @@
 use crate::audio::{AudioChunk, AudioSource};
 use crate::{Error, Result};
 use async_trait::async_trait;
-use std::path::PathBuf;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
+
+/// 临时 wav 路径按视频路径确定性派生：暂停/崩溃留下的半截文件
+/// 会在同视频下次提取时被 ffmpeg -y 直接覆盖，不在 /tmp 堆积
+fn temp_wav_path(video_path: &Path) -> PathBuf {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    video_path.hash(&mut hasher);
+    std::env::temp_dir().join(format!("shiyane-{:x}.wav", hasher.finish()))
+}
 
 /// Audio source that extracts audio from a video file using ffmpeg.
 ///
@@ -39,6 +48,7 @@ impl FileAudioSource {
             .ok_or_else(|| Error::AudioSource("Path contains invalid UTF-8".to_string()))?;
 
         let output = Command::new("ffprobe")
+            .kill_on_drop(true)
             .args(&[
                 "-v",
                 "error",
@@ -74,6 +84,7 @@ impl FileAudioSource {
             .ok_or_else(|| Error::AudioSource("Path contains invalid UTF-8".to_string()))?;
 
         let output = Command::new("ffmpeg")
+            .kill_on_drop(true)
             .args(&[
                 "-ss",
                 &format!("{:.3}", start.as_secs_f64()),
@@ -166,11 +177,11 @@ impl AudioSource for FileAudioSource {
             .to_str()
             .ok_or_else(|| Error::AudioSource("Path contains invalid UTF-8".to_string()))?;
 
-        // Create temp file path
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join(format!("shiyane-{}.wav", uuid::Uuid::new_v4()));
+        // Create temp file path（确定性命名：暂停遗留的半截文件被 -y 覆盖）
+        let temp_file = temp_wav_path(&self.video_path);
 
         let output = Command::new("ffmpeg")
+            .kill_on_drop(true)
             .args(&[
                 "-i",
                 path_str,
@@ -194,5 +205,28 @@ impl AudioSource for FileAudioSource {
         }
 
         Ok(temp_file)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn temp_wav_path_is_deterministic_per_video() {
+        let a = PathBuf::from("/movies/test.mp4");
+        assert_eq!(temp_wav_path(&a), temp_wav_path(&a));
+        assert_ne!(
+            temp_wav_path(&a),
+            temp_wav_path(&PathBuf::from("/movies/other.mp4"))
+        );
+        let p = temp_wav_path(&a);
+        assert_eq!(p.extension().and_then(|e| e.to_str()), Some("wav"));
+        assert!(p
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("shiyane-"));
     }
 }

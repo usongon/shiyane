@@ -30,6 +30,7 @@ export interface AppConfig {
 export type PipelineStateName =
   | "idle"
   | "processing"
+  | "paused"
   | "completed"
   | "exported"
   | "failed";

@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::asr::{AsrConfig, FileAsrProvider};
 use crate::audio::AudioSource;
@@ -41,6 +42,8 @@ impl Phase {
 pub enum PipelineState {
     Idle,
     Processing,
+    /// 手动暂停：进度与 checkpoint 已是最新，可随时续跑（区别于 Failed）
+    Paused,
     Completed,
     Exported,
     Failed(String),
@@ -61,6 +64,8 @@ pub struct FilePipeline {
     current_fingerprint: Option<CheckpointFingerprint>,
     progress: Arc<Mutex<f64>>,
     phase: Arc<Mutex<Phase>>,
+    /// 协作式取消：命令层持有 handle 触发，三个长耗时 await 点响应
+    cancel: CancellationToken,
 }
 
 impl FilePipeline {
@@ -84,6 +89,7 @@ impl FilePipeline {
             current_fingerprint: None,
             progress: Arc::new(Mutex::new(0.0)),
             phase: Arc::new(Mutex::new(Phase::Extracting)),
+            cancel: CancellationToken::new(),
         }
     }
     
@@ -121,6 +127,20 @@ impl FilePipeline {
 
     pub fn phase_handle(&self) -> Arc<Mutex<Phase>> {
         self.phase.clone()
+    }
+
+    /// 取消句柄：外部（命令层/测试）触发协作式暂停
+    pub fn cancel_handle(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+
+    /// 取消已被触发后的统一归宿：置 Paused、正常返回（非失败）。
+    /// 调用点保证此刻进度与 checkpoint 均已落定。
+    async fn park_as_paused(&mut self) -> Result<()> {
+        let mut state = self.state.lock().await;
+        *state = PipelineState::Paused;
+        tracing::info!("管线已暂停（手动取消生效）");
+        Ok(())
     }
 
     pub async fn get_phase(&self) -> Phase {
@@ -220,9 +240,14 @@ impl FilePipeline {
         if items.is_none() {
             // Extract full audio to temporary WAV file
             tracing::info!("Extracting audio from video...");
-            let audio_path = match self.audio_source.extract_full_audio_to_wav().await {
-                Ok(path) => path,
-                Err(e) => {
+            let extracted = tokio::select! {
+                _ = self.cancel.cancelled() => None,
+                r = self.audio_source.extract_full_audio_to_wav() => Some(r),
+            };
+            let audio_path = match extracted {
+                None => return self.park_as_paused().await,
+                Some(Ok(path)) => path,
+                Some(Err(e)) => {
                     let mut state = self.state.lock().await;
                     *state = PipelineState::Failed(e.to_string());
                     return Err(e);
@@ -260,17 +285,25 @@ impl FilePipeline {
             drop(phase);
 
             tracing::info!("Starting file transcription with model: {}", asr_config.model);
-            let transcription =
-                match self.asr_provider.transcribe_file(&asr_config, &audio_path).await {
-                    Ok(result) => result,
-                    Err(e) => {
-                        let mut state = self.state.lock().await;
-                        *state = PipelineState::Failed(e.to_string());
-                        // Clean up temp file
-                        let _ = std::fs::remove_file(&audio_path);
-                        return Err(e);
-                    }
-                };
+            let transcribed = tokio::select! {
+                _ = self.cancel.cancelled() => None,
+                r = self.asr_provider.transcribe_file(&asr_config, &audio_path) => Some(r),
+            };
+            let transcription = match transcribed {
+                None => {
+                    // 取消发生在转写中：飞行请求作废，半成品临时音频由下次确定性文件名覆盖
+                    let _ = std::fs::remove_file(&audio_path);
+                    return self.park_as_paused().await;
+                }
+                Some(Ok(result)) => result,
+                Some(Err(e)) => {
+                    let mut state = self.state.lock().await;
+                    *state = PipelineState::Failed(e.to_string());
+                    // Clean up temp file
+                    let _ = std::fs::remove_file(&audio_path);
+                    return Err(e);
+                }
+            };
 
             tracing::info!("Transcription completed: {} sentences", transcription.sentences.len());
 
@@ -378,9 +411,14 @@ impl FilePipeline {
                 context: previous_texts.iter().rev().take(10).cloned().collect(),
                 glossary: None,
             };
-            let translate_resp = match self.translate_provider.translate(translate_req).await {
-                Ok(resp) => resp,
-                Err(e) => {
+            let translated = tokio::select! {
+                _ = self.cancel.cancelled() => None,
+                r = self.translate_provider.translate(translate_req) => Some(r),
+            };
+            let translate_resp = match translated {
+                None => return self.park_as_paused().await,
+                Some(Ok(resp)) => resp,
+                Some(Err(e)) => {
                     let mut state = self.state.lock().await;
                     *state = PipelineState::Failed(e.to_string());
                     return Err(e);

@@ -17,6 +17,9 @@ import {
   DownloadOutlined,
   ReloadOutlined,
   ArrowLeftOutlined,
+  PauseCircleOutlined,
+  StopOutlined,
+  DeleteOutlined,
 } from "@ant-design/icons";
 import { BackendContext } from "../lib/backend";
 import { basename } from "../lib/types";
@@ -34,6 +37,7 @@ const LANGUAGES = [
 const STATUS_LABEL: Record<PipelineStateName, string> = {
   idle: "准备中",
   processing: "处理中",
+  paused: "已暂停",
   completed: "已完成",
   exported: "已导出",
   failed: "失败",
@@ -54,6 +58,7 @@ export default function FilePage({ active }: { active: boolean }) {
   const [language, setLanguage] = useState("auto");
   const [dragOver, setDragOver] = useState(false);
   const [starting, setStarting] = useState(false);
+  const [pausing, setPausing] = useState(false);
   const [task, setTask] = useState<Task | null>(null);
   const [fileStatus, setFileStatus] = useState<TaskStatus | null>(null);
   const [exporting, setExporting] = useState<"srt" | "vtt" | null>(null);
@@ -205,6 +210,79 @@ export default function FilePage({ active }: { active: boolean }) {
       return;
     }
     doStart();
+  };
+
+  const refreshAfterPause = async () => {
+    try {
+      const info = await backend.getProcessingProgress();
+      setTask((t) => (t ? { ...t, progress: info } : t));
+    } catch {
+      /* 下次轮询兜底 */
+    }
+    // 刷新可续传状态：头部主按钮变为「继续处理（N%）」
+    if (file) {
+      try {
+        setFileStatus(await backend.getTaskStatus(file.path));
+      } catch {
+        /* 保持现状 */
+      }
+    }
+  };
+
+  const doPause = async () => {
+    if (!taskRunning) return;
+    setPausing(true);
+    try {
+      await backend.pauseFileProcessing();
+      stopPolling();
+      await refreshAfterPause();
+    } catch (e) {
+      message.error(`暂停失败：${e}`);
+    } finally {
+      setPausing(false);
+    }
+  };
+
+  const onPause = () => {
+    if (!taskRunning) return;
+    // 提取/转写阶段无句级断点，暂停即放弃本次转写（续跑重新上传+转写）
+    if (phase === "extracting" || phase === "transcribing") {
+      modal.confirm({
+        title: "暂停将放弃本次转写",
+        content:
+          "音频提取与转写无法断点保存，暂停后继续将重新上传音频并重新转写（费用重付）。确定暂停吗？",
+        okText: "暂停",
+        cancelText: "取消",
+        onOk: doPause,
+      });
+      return;
+    }
+    doPause();
+  };
+
+  const doStop = async () => {
+    if (!file) return;
+    try {
+      await backend.stopFileProcessing(file.path);
+      stopPolling();
+      setTask(null);
+      setFileStatus({ state: "fresh", percent: 0 });
+    } catch (e) {
+      message.error(`停止失败：${e}`);
+    }
+  };
+
+  const onStop = () => {
+    if (!file) return;
+    modal.confirm({
+      title: "停止并清除进度？",
+      content:
+        "已有进度将清零且不可恢复，已产生的转写与翻译费用不会退还。确定停止吗？",
+      okText: "停止并清零",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: doStop,
+    });
   };
 
   const onExport = async (format: "srt" | "vtt") => {
@@ -383,6 +461,11 @@ export default function FilePage({ active }: { active: boolean }) {
               aria-label="视频语言"
               disabled={taskRunning}
             />
+            {!taskRunning && fileStatus?.state === "translating" && (
+              <Button danger type="text" icon={<DeleteOutlined />} onClick={onStop}>
+                清除进度
+              </Button>
+            )}
             <Button
               type="primary"
               icon={<PlayCircleOutlined />}
@@ -436,7 +519,15 @@ export default function FilePage({ active }: { active: boolean }) {
                   percent={pct}
                   showInfo={false}
                   strokeColor={failed ? undefined : gradientStroke}
-                  status={failed ? "exception" : done ? "success" : "active"}
+                  status={
+                    failed
+                      ? "exception"
+                      : done
+                        ? "success"
+                        : task?.progress.state === "paused"
+                          ? "normal"
+                          : "active"
+                  }
                 />
                 <div className="task-status-line">
                   {failed ? (
@@ -447,10 +538,27 @@ export default function FilePage({ active }: { active: boolean }) {
                     "正在转写与翻译…"
                   ) : task.progress.state === "idle" ? (
                     "正在准备…"
+                  ) : task.progress.state === "paused" ? (
+                    "已暂停，可点击「继续处理」继续"
                   ) : done ? (
                     "转写完成，可导出字幕文件"
                   ) : null}
                 </div>
+
+                {taskRunning && (
+                  <div className="task-actions">
+                    <Button
+                      icon={<PauseCircleOutlined />}
+                      loading={pausing}
+                      onClick={onPause}
+                    >
+                      暂停
+                    </Button>
+                    <Button danger icon={<StopOutlined />} onClick={onStop}>
+                      停止
+                    </Button>
+                  </div>
+                )}
 
                 {done && (
                   <div className="task-actions">

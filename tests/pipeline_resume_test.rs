@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 fn fp(source_language: &str, target_lang: &str) -> CheckpointFingerprint {
     CheckpointFingerprint {
@@ -297,6 +298,296 @@ async fn zero_sentence_asr_fails_clearly() {
         other => panic!("零句 ASR 应进入 Failed，实际: {other:?}"),
     }
     assert!(calls.lock().unwrap().is_empty(), "零句时不得调用翻译");
+}
+
+/// 共享 token 槽：测试在构造管线后把 cancel_handle 塞进来，
+/// mock 在第 n 次调用（0 起）先取消再挂起，模拟「请求在飞行中被暂停」
+type SharedToken = Arc<StdMutex<Option<CancellationToken>>>;
+
+struct CancelOnTranslate {
+    n: usize,
+    token: SharedToken,
+    call_texts: Arc<StdMutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl TranslateProvider for CancelOnTranslate {
+    async fn translate(&self, req: TranslateRequest) -> Result<TranslateResponse> {
+        let k = self.call_texts.lock().unwrap().len();
+        self.call_texts.lock().unwrap().push(req.text.clone());
+        if k == self.n {
+            if let Some(t) = self.token.lock().unwrap().as_ref() {
+                t.cancel();
+            }
+            std::future::pending().await
+        } else {
+            Ok(TranslateResponse {
+                translated_text: format!("[T] {}", req.text),
+            })
+        }
+    }
+    async fn test_connection(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+struct CancelOnAsr {
+    token: SharedToken,
+    call_count: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl FileAsrProvider for CancelOnAsr {
+    async fn transcribe_file(
+        &self,
+        _config: &AsrConfig,
+        _audio_path: &Path,
+    ) -> Result<FileTranscriptionResult> {
+        self.call_count.fetch_add(1, Ordering::SeqCst);
+        if let Some(t) = self.token.lock().unwrap().as_ref() {
+            t.cancel();
+        }
+        std::future::pending().await
+    }
+}
+
+struct CancelOnExtract {
+    token: SharedToken,
+    extract_count: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl AudioSource for CancelOnExtract {
+    async fn next_chunk(&mut self) -> Result<pick_up_sound_text::audio::AudioChunk> {
+        Err(Error::AudioSource("End of file".to_string()))
+    }
+    async fn seek(&mut self, _pos: Duration) -> Result<()> {
+        Ok(())
+    }
+    fn supports_seek(&self) -> bool {
+        true
+    }
+    fn total_duration(&self) -> Option<Duration> {
+        Some(Duration::from_secs(600))
+    }
+    async fn extract_full_audio_to_wav(&self) -> Result<PathBuf> {
+        self.extract_count.fetch_add(1, Ordering::SeqCst);
+        if let Some(t) = self.token.lock().unwrap().as_ref() {
+            t.cancel();
+        }
+        std::future::pending().await
+    }
+}
+
+/// 把管线的 cancel_handle 注入共享槽（构造后、process 前调用）
+fn share_cancel(p: &FilePipeline, slot: &SharedToken) {
+    *slot.lock().unwrap() = Some(p.cancel_handle());
+}
+
+#[tokio::test]
+async fn pause_during_translate_parks_state_and_keeps_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let slot: SharedToken = Arc::new(StdMutex::new(None));
+    let calls = Arc::new(StdMutex::new(Vec::new()));
+    let extract = Arc::new(AtomicUsize::new(0));
+    let asr_count = Arc::new(AtomicUsize::new(0));
+    let mut p = FilePipeline::new(
+        Box::new(MockAudioSource {
+            extract_count: extract.clone(),
+            tag: "pz1".to_string(),
+        }),
+        Box::new(MockFileAsr {
+            sentences: sentences(5),
+            call_count: asr_count.clone(),
+        }),
+        Box::new(CancelOnTranslate {
+            n: 2,
+            token: slot.clone(),
+            call_texts: calls.clone(),
+        }),
+        AppConfig::default(),
+        "auto".to_string(),
+    );
+    p.init_checkpoint_in(
+        dir.path().to_path_buf(),
+        "t-pause-tx".to_string(),
+        PathBuf::from("/tmp/resume_test_video.mp4"),
+        fp("auto", "zh"),
+    )
+    .unwrap();
+    share_cancel(&p, &slot);
+    let progress = p.progress_handle();
+
+    // 挂起保护：取消机制若失效，飞行中的请求永不返回，测试超时兜底
+    let outcome = tokio::time::timeout(Duration::from_secs(5), p.process()).await;
+
+    assert_eq!(outcome.expect("暂停必须在超时内返回").unwrap(), ());
+    assert_eq!(
+        p.get_state().await,
+        pick_up_sound_text::pipeline::PipelineState::Paused
+    );
+    assert_eq!((p.get_progress().await * 100.0).round() as i64, 40);
+    assert_eq!(*progress.lock().await, 0.4);
+
+    // 盘上精确保留已完成的 2 句，飞行中的第 3 句不得落盘
+    let cp = Checkpoint::load(&dir.path().join("t-pause-tx/progress.jsonl"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(cp.completed_count(), 2);
+    assert_eq!(cp.segments.len(), 5);
+    assert_eq!(
+        cp.segments[2].status,
+        pick_up_sound_text::checkpoint::SegmentStatus::Pending
+    );
+    assert_eq!(calls.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn pause_during_asr_returns_paused_without_persisting_sentences() {
+    let dir = tempfile::tempdir().unwrap();
+    let slot: SharedToken = Arc::new(StdMutex::new(None));
+    let extract = Arc::new(AtomicUsize::new(0));
+    let asr_count = Arc::new(AtomicUsize::new(0));
+    let mut p = FilePipeline::new(
+        Box::new(MockAudioSource {
+            extract_count: extract.clone(),
+            tag: "pz2".to_string(),
+        }),
+        Box::new(CancelOnAsr {
+            token: slot.clone(),
+            call_count: asr_count.clone(),
+        }),
+        Box::new(MockTranslate {
+            fail_on: None,
+            call_texts: Arc::new(StdMutex::new(Vec::new())),
+        }),
+        AppConfig::default(),
+        "auto".to_string(),
+    );
+    p.init_checkpoint_in(
+        dir.path().to_path_buf(),
+        "t-pause-asr".to_string(),
+        PathBuf::from("/tmp/resume_test_video.mp4"),
+        fp("auto", "zh"),
+    )
+    .unwrap();
+    share_cancel(&p, &slot);
+
+    let outcome = tokio::time::timeout(Duration::from_secs(5), p.process()).await;
+
+    assert_eq!(outcome.expect("暂停必须在超时内返回").unwrap(), ());
+    assert_eq!(
+        p.get_state().await,
+        pick_up_sound_text::pipeline::PipelineState::Paused
+    );
+    assert_eq!(p.get_phase().await, Phase::Transcribing);
+    assert_eq!(asr_count.load(Ordering::SeqCst), 1);
+    // 转写无句级断点：暂停时不得有任何句子进度（续跑=重新上传+转写）
+    let persisted = Checkpoint::load(&dir.path().join("t-pause-asr/progress.jsonl")).unwrap();
+    assert!(
+        persisted.as_ref().map(|c| c.segments.is_empty()).unwrap_or(true),
+        "转写中暂停不应落盘句子，实际: {persisted:?}"
+    );
+}
+
+#[tokio::test]
+async fn pause_during_extract_returns_paused() {
+    let dir = tempfile::tempdir().unwrap();
+    let slot: SharedToken = Arc::new(StdMutex::new(None));
+    let extract = Arc::new(AtomicUsize::new(0));
+    let asr_count = Arc::new(AtomicUsize::new(0));
+    let mut p = FilePipeline::new(
+        Box::new(CancelOnExtract {
+            token: slot.clone(),
+            extract_count: extract.clone(),
+        }),
+        Box::new(MockFileAsr {
+            sentences: sentences(5),
+            call_count: asr_count.clone(),
+        }),
+        Box::new(MockTranslate {
+            fail_on: None,
+            call_texts: Arc::new(StdMutex::new(Vec::new())),
+        }),
+        AppConfig::default(),
+        "auto".to_string(),
+    );
+    p.init_checkpoint_in(
+        dir.path().to_path_buf(),
+        "t-pause-ex".to_string(),
+        PathBuf::from("/tmp/resume_test_video.mp4"),
+        fp("auto", "zh"),
+    )
+    .unwrap();
+    share_cancel(&p, &slot);
+
+    let outcome = tokio::time::timeout(Duration::from_secs(5), p.process()).await;
+
+    assert_eq!(outcome.expect("暂停必须在超时内返回").unwrap(), ());
+    assert_eq!(
+        p.get_state().await,
+        pick_up_sound_text::pipeline::PipelineState::Paused
+    );
+    assert_eq!(p.get_phase().await, Phase::Extracting);
+    assert_eq!(extract.load(Ordering::SeqCst), 1);
+    assert_eq!(asr_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn resume_after_pause_completes_without_asr_rerun() {
+    let dir = tempfile::tempdir().unwrap();
+    // 第一次：第 3 句飞行中暂停 → 盘上 2 句 Completed
+    let slot: SharedToken = Arc::new(StdMutex::new(None));
+    let calls1 = Arc::new(StdMutex::new(Vec::new()));
+    let extract1 = Arc::new(AtomicUsize::new(0));
+    let asr1 = Arc::new(AtomicUsize::new(0));
+    let mut p1 = FilePipeline::new(
+        Box::new(MockAudioSource {
+            extract_count: extract1.clone(),
+            tag: "pz3a".to_string(),
+        }),
+        Box::new(MockFileAsr {
+            sentences: sentences(5),
+            call_count: asr1.clone(),
+        }),
+        Box::new(CancelOnTranslate {
+            n: 2,
+            token: slot.clone(),
+            call_texts: calls1.clone(),
+        }),
+        AppConfig::default(),
+        "auto".to_string(),
+    );
+    p1.init_checkpoint_in(
+        dir.path().to_path_buf(),
+        "t-pause-rs".to_string(),
+        PathBuf::from("/tmp/resume_test_video.mp4"),
+        fp("auto", "zh"),
+    )
+    .unwrap();
+    share_cancel(&p1, &slot);
+    p1.process().await.unwrap();
+    assert_eq!(
+        p1.get_state().await,
+        pick_up_sound_text::pipeline::PipelineState::Paused
+    );
+
+    // 第二次：普通 provider 续跑，必须跳过提取/ASR，只翻剩余句子
+    let (mut p2, extract2, asr2, calls2) =
+        build_pipeline(dir.path(), "t-pause-rs", fp("auto", "zh"), sentences(5), None, "pz3b");
+    p2.process().await.unwrap();
+
+    assert_eq!(p2.get_state().await, pick_up_sound_text::pipeline::PipelineState::Completed);
+    assert_eq!(asr2.load(Ordering::SeqCst), 0, "暂停后续跑必须跳过 ASR");
+    assert_eq!(extract2.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        calls2.lock().unwrap().clone(),
+        vec!["s2", "s3", "s4"],
+        "只翻剩余句子"
+    );
+    let entries = p2.get_entries().await;
+    assert_eq!(entries.len(), 5);
+    assert_eq!(entries[2].translated, "[T] s2");
 }
 
 #[tokio::test]
