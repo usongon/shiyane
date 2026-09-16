@@ -16,6 +16,8 @@ A cross-platform desktop app that turns video files into translated subtitles. D
 ## Features
 
 - **File-to-subtitle pipeline** — drag & drop or file picker, live progress with per-sentence granularity, clear success/failure states with error messages
+- **Resume & task control** — per-sentence progress is persisted; after a crash or restart, tasks resume from where they stopped (no re-upload or re-transcription). Pause anytime; stop resets the task
+- **Recent tasks** — the home screen lists recently processed videos with their status; resume unfinished tasks or delete them
 - **Real connectivity tests** — validate ASR / translate / OSS settings before saving
 - **BYOK** — API keys are encrypted locally (AES-256-GCM + Argon2), only ever sent to the respective API
 - **Private-by-default audio handling** — audio is uploaded to your own OSS bucket via signed URLs and deleted once transcription finishes
@@ -89,6 +91,7 @@ src/               # Rust backend
 ├── oss/          # OSS uploader with HMAC-SHA1 signed URLs
 ├── translate/    # TranslateProvider trait + OpenAI-compatible HTTP client
 ├── pipeline/     # FilePipeline: extract → transcribe → translate → entries
+├── checkpoint/   # resume: append-only progress log
 ├── subtitle/     # SubtitleEntry, SRT/VTT generation
 ├── config/       # AppConfig + encrypted keystore
 └── commands/     # Tauri commands (frontend ↔ backend)
