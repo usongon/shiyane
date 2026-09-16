@@ -16,6 +16,7 @@ import {
   PlayCircleOutlined,
   DownloadOutlined,
   ReloadOutlined,
+  ArrowLeftOutlined,
 } from "@ant-design/icons";
 import { BackendContext } from "../lib/backend";
 import { basename } from "../lib/types";
@@ -46,7 +47,7 @@ interface Task {
 
 export default function FilePage({ active }: { active: boolean }) {
   const backend = useContext(BackendContext);
-  const { message } = AntdApp.useApp();
+  const { message, modal } = AntdApp.useApp();
   const { token } = antdTheme.useToken();
 
   const [file, setFile] = useState<{ path: string; name: string } | null>(null);
@@ -156,8 +157,15 @@ export default function FilePage({ active }: { active: boolean }) {
     }
   };
 
-  const onStart = async () => {
-    if (!file || taskRunning) return;
+  const onBack = () => {
+    if (taskRunning) return;
+    setFile(null);
+    setFileStatus(null);
+    setTask(null);
+  };
+
+  const doStart = async () => {
+    if (!file) return;
     setStarting(true);
     try {
       const id = await backend.startFileProcessing(file.path, language);
@@ -177,6 +185,26 @@ export default function FilePage({ active }: { active: boolean }) {
     } finally {
       setStarting(false);
     }
+  };
+
+  const onStart = () => {
+    if (!file || taskRunning) return;
+    // 可续传任务的源语言被改过 → 续传失效，弹窗确认后再全量重跑
+    if (langChanged && fileStatus) {
+      const langLabel = (v: string) => LANGUAGES.find((l) => l.value === v)?.label ?? v;
+      modal.confirm({
+        title: "源语言已改变",
+        content: `该任务已有 ${Math.round(fileStatus.percent * 100)}% 进度（源语言：${langLabel(
+          fileStatus.source_language!,
+        )}）。当前选择的源语言是「${langLabel(language)}」，语言不同将放弃已有进度全量重跑（含重新转写与上传）。`,
+        okText: "放弃进度，全量重跑",
+        okButtonProps: { danger: true },
+        cancelText: "取消",
+        onOk: doStart,
+      });
+      return;
+    }
+    doStart();
   };
 
   const onExport = async (format: "srt" | "vtt") => {
@@ -331,6 +359,13 @@ export default function FilePage({ active }: { active: boolean }) {
                 {file.path}
               </div>
             </div>
+            <Button
+              icon={<ArrowLeftOutlined />}
+              onClick={onBack}
+              disabled={taskRunning}
+            >
+              返回
+            </Button>
             <Tooltip title="重新选择文件">
               <Button
                 type="text"
@@ -357,13 +392,11 @@ export default function FilePage({ active }: { active: boolean }) {
             >
               {task && done
                 ? "重新处理"
-                : langChanged
-                  ? "开始转字幕（语言已改，将全量重跑）"
-                  : fileStatus?.state === "translating"
-                    ? `继续处理（${Math.round((fileStatus.percent ?? 0) * 100)}%）`
-                    : fileStatus?.state === "completed"
-                      ? "重新处理"
-                      : "开始转字幕"}
+                : fileStatus?.state === "translating"
+                  ? `继续处理（${Math.round((fileStatus.percent ?? 0) * 100)}%）`
+                  : fileStatus?.state === "completed"
+                    ? "重新处理"
+                    : "开始转字幕"}
             </Button>
           </div>
 
