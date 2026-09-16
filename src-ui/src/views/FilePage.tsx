@@ -473,9 +473,13 @@ export default function FilePage({ active }: { active: boolean }) {
             {!taskRunning && (
               <Tooltip
                 title={
-                  fileStatus?.state === "translating"
-                    ? `继续处理（${Math.round((fileStatus.percent ?? 0) * 100)}%），从断点继续`
-                    : null
+                  task && done
+                    ? "重新处理"
+                    : fileStatus?.state === "translating"
+                      ? "继续处理"
+                      : fileStatus?.state === "completed"
+                        ? "重新处理"
+                        : "开始转字幕"
                 }
               >
                 <Button
@@ -483,19 +487,12 @@ export default function FilePage({ active }: { active: boolean }) {
                   icon={<PlayCircleOutlined />}
                   loading={starting}
                   onClick={onStart}
-                >
-                  {task && done
-                    ? "重新处理"
-                    : fileStatus?.state === "translating"
-                      ? `${Math.round((fileStatus.percent ?? 0) * 100)}%`
-                      : fileStatus?.state === "completed"
-                        ? "重新处理"
-                        : "开始转字幕"}
-                </Button>
+                  aria-label="开始或继续处理"
+                />
               </Tooltip>
             )}
             {!taskRunning && fileStatus?.state === "translating" && (
-              <Tooltip title="清除进度（不可恢复）">
+              <Tooltip title="清除进度">
                 <Button
                   danger
                   type="text"
