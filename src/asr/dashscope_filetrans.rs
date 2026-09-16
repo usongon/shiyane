@@ -5,6 +5,7 @@ use crate::{Error, Result};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::json;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use tokio::time::{sleep, Duration};
 
@@ -35,7 +36,7 @@ impl FileAsrProvider for DashScopeFileTransProvider {
             .ok_or_else(|| Error::Asr("OSS config is required for file transcription".to_string()))?;
         
         let uploader = OssUploader::new(oss_config.clone());
-        let object_name = format!("shiyane-{}.wav", uuid::Uuid::new_v4());
+        let object_name = oss_object_name(audio_path);
         let file_url = uploader.upload_file(audio_path, &object_name).await?;
         tracing::info!("Uploaded audio file to OSS: {}", file_url);
         
@@ -169,7 +170,7 @@ impl FileAsrProvider for DashScopeFileTransProvider {
         }
         
         tracing::info!("Parsed {} sentences from transcription result", sentences.len());
-        
+
         // Step 6: Clean up OSS file (optional, ignore errors)
         tracing::info!("Deleting OSS file: {}", object_name);
         if let Err(e) = uploader.delete_file(&object_name).await {
@@ -177,7 +178,29 @@ impl FileAsrProvider for DashScopeFileTransProvider {
         } else {
             tracing::info!("OSS file deleted successfully: {}", object_name);
         }
-        
+
         Ok(FileTranscriptionResult { sentences })
+    }
+}
+
+/// OSS 对象名按音频路径确定性派生：转写中暂停会丢弃 in-flight future、
+/// 跳过 Step 6 清理；确定性命名让泄漏有界（同视频重跑直接覆盖同名对象）
+fn oss_object_name(audio_path: &Path) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    audio_path.hash(&mut hasher);
+    format!("shiyane-{:x}.wav", hasher.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oss_object_name_is_deterministic_per_audio() {
+        let a = Path::new("/tmp/shiyane-abc.wav");
+        assert_eq!(oss_object_name(a), oss_object_name(a));
+        assert_ne!(oss_object_name(a), oss_object_name(Path::new("/tmp/other.wav")));
+        let n = oss_object_name(a);
+        assert!(n.starts_with("shiyane-") && n.ends_with(".wav"));
     }
 }

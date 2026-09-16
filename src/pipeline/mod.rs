@@ -152,6 +152,11 @@ impl FilePipeline {
         *state = PipelineState::Processing;
         drop(state);
 
+        // 入口守卫：process 启动前已取消（如暂停命令抢先到达）→ 不启动任何工作
+        if self.cancel.is_cancelled() {
+            return self.park_as_paused().await;
+        }
+
         let mut phase = self.phase.lock().await;
         *phase = Phase::Extracting;
         drop(phase);
@@ -241,8 +246,9 @@ impl FilePipeline {
             // Extract full audio to temporary WAV file
             tracing::info!("Extracting audio from video...");
             let extracted = tokio::select! {
-                _ = self.cancel.cancelled() => None,
+                biased;
                 r = self.audio_source.extract_full_audio_to_wav() => Some(r),
+                _ = self.cancel.cancelled() => None,
             };
             let audio_path = match extracted {
                 None => return self.park_as_paused().await,
@@ -286,8 +292,9 @@ impl FilePipeline {
 
             tracing::info!("Starting file transcription with model: {}", asr_config.model);
             let transcribed = tokio::select! {
-                _ = self.cancel.cancelled() => None,
+                biased;
                 r = self.asr_provider.transcribe_file(&asr_config, &audio_path) => Some(r),
+                _ = self.cancel.cancelled() => None,
             };
             let transcription = match transcribed {
                 None => {
@@ -385,6 +392,11 @@ impl FilePipeline {
 
         let mut entries: Vec<SubtitleEntry> = Vec::with_capacity(total_sentences);
         for (idx, item) in items.iter().enumerate() {
+            // 句间守卫：已取消则不再发起新的翻译请求（避免浪费一次调用）
+            if self.cancel.is_cancelled() {
+                return self.park_as_paused().await;
+            }
+
             if let Some(done) = &item.translated {
                 entries.push(SubtitleEntry {
                     content_start: item.begin,
@@ -411,9 +423,11 @@ impl FilePipeline {
                 context: previous_texts.iter().rev().take(10).cloned().collect(),
                 glossary: None,
             };
+            // biased + 操作分支在前：取消与已就绪结果同时存在时收割结果（不浪费已付费工作）
             let translated = tokio::select! {
-                _ = self.cancel.cancelled() => None,
+                biased;
                 r = self.translate_provider.translate(translate_req) => Some(r),
+                _ = self.cancel.cancelled() => None,
             };
             let translate_resp = match translated {
                 None => return self.park_as_paused().await,

@@ -29,6 +29,7 @@ fn main() {
         pipeline_phase: Arc::new(Mutex::new(None)),
         cancel_token: Arc::new(Mutex::new(None)),
         running_video_path: Arc::new(Mutex::new(None)),
+        control: Arc::new(Mutex::new(())),
     };
 
     tauri::Builder::default()

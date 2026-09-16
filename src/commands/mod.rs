@@ -61,6 +61,17 @@ pub struct AppState {
     /// 当前运行任务的取消句柄与视频路径（暂停/停止用；无运行任务时为 None）
     pub cancel_token: Arc<Mutex<Option<CancellationToken>>>,
     pub running_video_path: Arc<Mutex<Option<String>>>,
+    /// 串行化 start/pause/stop：交错调用也不会出现「旧任务句柄被新任务清除」等竞态
+    pub control: Arc<Mutex<()>>,
+}
+
+/// 所有任务 checkpoint 的根目录（$APP_DATA/tasks）
+fn tasks_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("tasks"))
 }
 
 #[tauri::command]
@@ -85,7 +96,8 @@ pub async fn start_file_processing(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     tracing::info!("start_file_processing called: video_path={}, source_language={}", video_path, source_language);
-    
+
+    let _control = state.control.lock().await;
     let video_path = PathBuf::from(video_path);
 
     // Get config
@@ -122,11 +134,7 @@ pub async fn start_file_processing(
     // Stable task_id（path+size+mtime）：同文件重跑续传，换文件天然隔离
     let task_id = compute_task_id(&video_path).map_err(|e| e.to_string())?;
 
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("tasks");
+    let app_data_dir = tasks_root(&app)?;
 
     let fingerprint = CheckpointFingerprint {
         source_language: source_language.clone(),
@@ -243,6 +251,7 @@ pub async fn get_processing_progress(state: State<'_, AppState>) -> Result<Progr
 
 #[tauri::command]
 pub async fn pause_file_processing(state: State<'_, AppState>) -> Result<(), String> {
+    let _control = state.control.lock().await;
     let token = state.cancel_token.lock().await.clone();
     if let Some(t) = token.as_ref() {
         t.cancel();
@@ -261,6 +270,7 @@ pub async fn stop_file_processing(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    let _control = state.control.lock().await;
     let running = state.running_video_path.lock().await.clone();
     let was_running = running.as_deref() == Some(video_path.as_str());
 
@@ -282,15 +292,17 @@ pub async fn stop_file_processing(
         *state.running_video_path.lock().await = None;
     }
 
-    // 归零：删除该文件的整个 checkpoint 目录（运行中与未运行同样适用）
+    // 归零：删除该文件的整个 checkpoint 目录（运行中与未运行同样适用）。
+    // 视频文件已删除 = 无可清任务，静默成功（与 get_task_status 的 NotFound 语义一致）
     let path = PathBuf::from(&video_path);
-    let task_id = compute_task_id(&path).map_err(|e| e.to_string())?;
-    let task_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("tasks")
-        .join(&task_id);
+    let task_id = match compute_task_id(&path) {
+        Ok(id) => id,
+        Err(pick_up_sound_text::Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(())
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    let task_dir = tasks_root(&app)?.join(&task_id);
     if task_dir.exists() {
         std::fs::remove_dir_all(&task_dir).map_err(|e| e.to_string())?;
     }
@@ -400,11 +412,7 @@ pub async fn get_task_status(
         }
         Err(e) => return Err(e.to_string()),
     };
-    let cp_path = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("tasks")
+    let cp_path = tasks_root(&app)?
         .join(&task_id)
         .join("progress.jsonl");
 
@@ -447,11 +455,7 @@ pub async fn get_task_status(
 
 #[tauri::command]
 pub async fn list_recent_tasks(app: tauri::AppHandle) -> Result<Vec<RecentTask>, String> {
-    let tasks_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("tasks");
+    let tasks_dir = tasks_root(&app)?;
 
     if !tasks_dir.exists() {
         return Ok(Vec::new());

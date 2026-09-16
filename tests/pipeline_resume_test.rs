@@ -304,6 +304,33 @@ async fn zero_sentence_asr_fails_clearly() {
 /// mock 在第 n 次调用（0 起）先取消再挂起，模拟「请求在飞行中被暂停」
 type SharedToken = Arc<StdMutex<Option<CancellationToken>>>;
 
+/// 第 n 次调用（0 起）先取消再「立即返回结果」：
+/// 取消与已就绪（已付费）结果同时存在，钉住「收割结果优先于丢弃」
+struct HarvestCancelOnTranslate {
+    n: usize,
+    token: SharedToken,
+    call_texts: Arc<StdMutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl TranslateProvider for HarvestCancelOnTranslate {
+    async fn translate(&self, req: TranslateRequest) -> Result<TranslateResponse> {
+        let k = self.call_texts.lock().unwrap().len();
+        self.call_texts.lock().unwrap().push(req.text.clone());
+        if k == self.n {
+            if let Some(t) = self.token.lock().unwrap().as_ref() {
+                t.cancel();
+            }
+        }
+        Ok(TranslateResponse {
+            translated_text: format!("[T] {}", req.text),
+        })
+    }
+    async fn test_connection(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
 struct CancelOnTranslate {
     n: usize,
     token: SharedToken,
@@ -588,6 +615,73 @@ async fn resume_after_pause_completes_without_asr_rerun() {
     let entries = p2.get_entries().await;
     assert_eq!(entries.len(), 5);
     assert_eq!(entries[2].translated, "[T] s2");
+}
+
+#[tokio::test]
+async fn pre_cancelled_token_pauses_before_any_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut p, extract, asr_count, calls) =
+        build_pipeline(dir.path(), "t-pre-cancel", fp("auto", "zh"), sentences(5), None, "pc1");
+    p.cancel_handle().cancel(); // process 启动前已取消
+
+    let outcome = tokio::time::timeout(Duration::from_secs(5), p.process()).await;
+
+    assert_eq!(outcome.expect("必须立即返回").unwrap(), ());
+    assert_eq!(
+        p.get_state().await,
+        pick_up_sound_text::pipeline::PipelineState::Paused
+    );
+    assert_eq!(extract.load(Ordering::SeqCst), 0, "取消后不得启动音频提取");
+    assert_eq!(asr_count.load(Ordering::SeqCst), 0, "取消后不得启动转写");
+    assert!(calls.lock().unwrap().is_empty(), "取消后不得发起翻译");
+}
+
+#[tokio::test]
+async fn cancel_with_ready_response_harvests_paid_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let slot: SharedToken = Arc::new(StdMutex::new(None));
+    let calls = Arc::new(StdMutex::new(Vec::new()));
+    let extract = Arc::new(AtomicUsize::new(0));
+    let asr_count = Arc::new(AtomicUsize::new(0));
+    let mut p = FilePipeline::new(
+        Box::new(MockAudioSource {
+            extract_count: extract.clone(),
+            tag: "hv1".to_string(),
+        }),
+        Box::new(MockFileAsr {
+            sentences: sentences(5),
+            call_count: asr_count.clone(),
+        }),
+        Box::new(HarvestCancelOnTranslate {
+            n: 2,
+            token: slot.clone(),
+            call_texts: calls.clone(),
+        }),
+        AppConfig::default(),
+        "auto".to_string(),
+    );
+    p.init_checkpoint_in(
+        dir.path().to_path_buf(),
+        "t-harvest".to_string(),
+        PathBuf::from("/tmp/resume_test_video.mp4"),
+        fp("auto", "zh"),
+    )
+    .unwrap();
+    share_cancel(&p, &slot);
+
+    p.process().await.unwrap();
+
+    // s0/s1 正常完成；s2 结果已就绪 → 收割落盘；s3 不再发起新请求
+    assert_eq!(
+        p.get_state().await,
+        pick_up_sound_text::pipeline::PipelineState::Paused
+    );
+    assert_eq!(calls.lock().unwrap().len(), 3);
+    let cp = Checkpoint::load(&dir.path().join("t-harvest/progress.jsonl"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(cp.completed_count(), 3, "已就绪的付费结果必须收割");
+    assert_eq!(cp.segments[3].status, pick_up_sound_text::checkpoint::SegmentStatus::Pending);
 }
 
 #[tokio::test]

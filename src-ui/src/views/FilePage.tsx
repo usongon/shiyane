@@ -78,6 +78,15 @@ export default function FilePage({ active }: { active: boolean }) {
     }
   }, []);
 
+  const refreshFileStatus = useCallback(async () => {
+    if (!file) return;
+    try {
+      setFileStatus(await backend.getTaskStatus(file.path));
+    } catch {
+      /* 保持现状 */
+    }
+  }, [backend, file]);
+
   const startPolling = useCallback(() => {
     stopPolling();
     pollRef.current = window.setInterval(async () => {
@@ -86,12 +95,15 @@ export default function FilePage({ active }: { active: boolean }) {
         setTask((t) => (t ? { ...t, progress: info } : t));
         if (info.state !== "processing" && info.state !== "idle") {
           stopPolling();
+          // 终态后同步可续传状态：头部按钮/清除进度都以 fileStatus 为准，
+          // 不刷新会让已完成任务旁边残留「清除进度」
+          refreshFileStatus();
         }
       } catch (e) {
         console.error("进度查询失败:", e);
       }
     }, 1000);
-  }, [backend, stopPolling]);
+  }, [backend, stopPolling, refreshFileStatus]);
 
   useEffect(() => stopPolling, [stopPolling]);
 
@@ -220,13 +232,7 @@ export default function FilePage({ active }: { active: boolean }) {
       /* 下次轮询兜底 */
     }
     // 刷新可续传状态：头部主按钮变为「继续处理（N%）」
-    if (file) {
-      try {
-        setFileStatus(await backend.getTaskStatus(file.path));
-      } catch {
-        /* 保持现状 */
-      }
-    }
+    await refreshFileStatus();
   };
 
   const doPause = async () => {
@@ -539,7 +545,11 @@ export default function FilePage({ active }: { active: boolean }) {
                   ) : task.progress.state === "idle" ? (
                     "正在准备…"
                   ) : task.progress.state === "paused" ? (
-                    "已暂停，可点击「继续处理」继续"
+                    fileStatus?.state === "translating" ? (
+                      "已暂停，可点击「继续处理」继续"
+                    ) : (
+                      "已暂停，本次转写未保留，继续将重新上传并转写"
+                    )
                   ) : done ? (
                     "转写完成，可导出字幕文件"
                   ) : null}
