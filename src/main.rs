@@ -1,9 +1,9 @@
 mod commands;
 
 use commands::{
-    export_subtitle, get_config, get_processing_progress, get_task_status, list_recent_tasks,
-    pause_file_processing, save_config, start_file_processing, stop_file_processing,
-    test_asr_connection, test_translate_connection, AppState,
+    delete_task, export_subtitle, get_config, get_processing_progress, get_task_status,
+    list_recent_tasks, pause_file_processing, save_config, start_file_processing,
+    stop_file_processing, test_asr_connection, test_translate_connection, AppState,
 };
 use pick_up_sound_text::config::AppConfig;
 use std::sync::Arc;
@@ -29,6 +29,7 @@ fn main() {
         pipeline_phase: Arc::new(Mutex::new(None)),
         cancel_token: Arc::new(Mutex::new(None)),
         running_video_path: Arc::new(Mutex::new(None)),
+        running_task_id: Arc::new(Mutex::new(None)),
         control: Arc::new(Mutex::new(())),
     };
 
@@ -39,6 +40,7 @@ fn main() {
             start_file_processing,
             pause_file_processing,
             stop_file_processing,
+            delete_task,
             get_processing_progress,
             export_subtitle,
             get_config,

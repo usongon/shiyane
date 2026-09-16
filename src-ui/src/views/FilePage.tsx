@@ -174,7 +174,7 @@ export default function FilePage({ active }: { active: boolean }) {
       cancelText: "取消",
       onOk: async () => {
         try {
-          await backend.stopFileProcessing(rt.video_path);
+          await backend.deleteTask(rt.task_id);
           setRecentTasks((prev) => prev.filter((t) => t.task_id !== rt.task_id));
         } catch (e) {
           message.error(`删除失败：${e}`);

@@ -61,6 +61,7 @@ pub struct AppState {
     /// 当前运行任务的取消句柄与视频路径（暂停/停止用；无运行任务时为 None）
     pub cancel_token: Arc<Mutex<Option<CancellationToken>>>,
     pub running_video_path: Arc<Mutex<Option<String>>>,
+    pub running_task_id: Arc<Mutex<Option<String>>>,
     /// 串行化 start/pause/stop：交错调用也不会出现「旧任务句柄被新任务清除」等竞态
     pub control: Arc<Mutex<()>>,
 }
@@ -72,6 +73,26 @@ fn tasks_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .app_data_dir()
         .map_err(|e| e.to_string())?
         .join("tasks"))
+}
+
+/// 取消运行中的任务并等待退出，随后清空全部运行句柄。
+/// 调用前提：调用方已确认目标就是当前运行任务（路径或 task_id 匹配）。
+async fn halt_running_task(state: &AppState) {
+    let token = state.cancel_token.lock().await.clone();
+    if let Some(t) = token.as_ref() {
+        t.cancel();
+    }
+    let handle = state.processing_task.lock().await.take();
+    if let Some(h) = handle {
+        let _ = h.await;
+    }
+    *state.pipeline_state.lock().await = None;
+    *state.pipeline_entries.lock().await = None;
+    *state.pipeline_progress.lock().await = None;
+    *state.pipeline_phase.lock().await = None;
+    *state.cancel_token.lock().await = None;
+    *state.running_video_path.lock().await = None;
+    *state.running_task_id.lock().await = None;
 }
 
 #[tauri::command]
@@ -180,6 +201,10 @@ pub async fn start_file_processing(
     *running_guard = Some(video_path.to_string_lossy().to_string());
     drop(running_guard);
 
+    let mut running_id_guard = state.running_task_id.lock().await;
+    *running_id_guard = Some(task_id.clone());
+    drop(running_id_guard);
+
     // Store pipeline reference
     let mut pipeline_guard = state.pipeline.lock().await;
     *pipeline_guard = Some(pipeline);
@@ -275,21 +300,7 @@ pub async fn stop_file_processing(
     let was_running = running.as_deref() == Some(video_path.as_str());
 
     if was_running {
-        let token = state.cancel_token.lock().await.clone();
-        if let Some(t) = token.as_ref() {
-            t.cancel();
-        }
-        let handle = state.processing_task.lock().await.take();
-        if let Some(h) = handle {
-            let _ = h.await;
-        }
-        // 清空运行句柄：进度查询回到 idle/0，进度面板不再引用已作废的管线
-        *state.pipeline_state.lock().await = None;
-        *state.pipeline_entries.lock().await = None;
-        *state.pipeline_progress.lock().await = None;
-        *state.pipeline_phase.lock().await = None;
-        *state.cancel_token.lock().await = None;
-        *state.running_video_path.lock().await = None;
+        halt_running_task(&state).await;
     }
 
     // 归零：删除该文件的整个 checkpoint 目录（运行中与未运行同样适用）。
@@ -302,6 +313,27 @@ pub async fn stop_file_processing(
         }
         Err(e) => return Err(e.to_string()),
     };
+    let task_dir = tasks_root(&app)?.join(&task_id);
+    if task_dir.exists() {
+        std::fs::remove_dir_all(&task_dir).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// 按 task_id 精确删除任务（最近列表用）。
+/// stop_file_processing 按路径重算 task_id，对「视频已被替换/移动」或
+/// 历史遗留目录（相对路径）会算错目标；列表行自带真实 task_id，直接命中。
+#[tauri::command]
+pub async fn delete_task(
+    task_id: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let _control = state.control.lock().await;
+    let running_id = state.running_task_id.lock().await.clone();
+    if running_id.as_deref() == Some(task_id.as_str()) {
+        halt_running_task(&state).await;
+    }
     let task_dir = tasks_root(&app)?.join(&task_id);
     if task_dir.exists() {
         std::fs::remove_dir_all(&task_dir).map_err(|e| e.to_string())?;

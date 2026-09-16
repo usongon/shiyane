@@ -29,6 +29,7 @@ let config: AppConfig = {
 let progress: ProgressInfo = { state: "idle", progress: 0, error: null, phase: "idle" };
 let timer: number | null = null;
 const deletedVideoPaths = new Set<string>();
+const deletedTaskIds = new Set<string>();
 
 function stopTimer() {
   if (timer !== null) {
@@ -86,6 +87,10 @@ export const mockBackend: Backend = {
     progress = { state: "idle", progress: 0, error: null, phase: "idle" };
     deletedVideoPaths.add(videoPath);
   },
+  async deleteTask(taskId) {
+    await delay(250);
+    deletedTaskIds.add(taskId);
+  },
   async getProcessingProgress() {
     return { ...progress };
   },
@@ -130,7 +135,9 @@ export const mockBackend: Backend = {
         percent: 0,
       },
     ];
-    return tasks.filter((t) => !deletedVideoPaths.has(t.video_path));
+    return tasks.filter(
+      (t) => !deletedVideoPaths.has(t.video_path) && !deletedTaskIds.has(t.task_id),
+    );
   },
   async getTaskStatus(videoPath) {
     await delay(200);
