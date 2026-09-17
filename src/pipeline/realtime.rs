@@ -140,7 +140,13 @@ impl RealtimePipeline {
         let video_path = PathBuf::from(format!("realtime://{}", self.session_id));
         let checkpoint = match Checkpoint::load(&checkpoint_path)? {
             Some(c) => c,
-            None => Checkpoint::new(self.session_id.clone(), video_path, fingerprint),
+            None => {
+                let c = Checkpoint::new(self.session_id.clone(), video_path, fingerprint);
+                // 新建会话必须先落盘 meta 行：append_updates 只追加 segment 行，
+                // meta 缺位会让 load 把首行 segment 误判为 meta 损坏（整档归档作废）
+                c.save(&checkpoint_path)?;
+                c
+            }
         };
         self.checkpoint = Some(checkpoint);
         self.checkpoint_path = Some(checkpoint_path);
@@ -395,6 +401,10 @@ impl RealtimePipeline {
                                 }
                             }
                             Ok(AsrEvent::Final { text, ts_start, ts_end }) => {
+                                // ASR 偶发空文本 Final（噪声起句）：不入列、不翻译、不写档
+                                if text.trim().is_empty() {
+                                    continue;
+                                }
                                 let offset = *session_offset_ms.lock().await;
                                 let adjusted_start = ts_start + offset as f64 / 1000.0;
                                 let adjusted_end = ts_end + offset as f64 / 1000.0;

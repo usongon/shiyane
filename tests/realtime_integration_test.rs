@@ -114,23 +114,30 @@ async fn realtime_checkpoint_save_and_load() {
     let cp_dir = dir.path().join(&session_id);
     assert!(cp_dir.exists());
 
-    // init_checkpoint_in 只创建目录并加载/新建 checkpoint 对象，不立即写文件。
-    // 使用 append_updates 触发首次写入，然后验证文件存在且可加载。
+    // init 即落盘 meta 行：append_updates 只追加 segment 行，
+    // meta 缺位会让 load 把首行 segment 误判为 meta 损坏（曾致整档作废）
     let cp_path = cp_dir.join("progress.jsonl");
-    assert!(!cp_path.exists());
-
-    // 直接通过 Checkpoint::new + save 模拟 pipeline 内部行为，验证持久化路径
-    let video_path = std::path::PathBuf::from(format!("realtime://{}", session_id));
-    let cp = Checkpoint::new(session_id.clone(), video_path, fingerprint);
-    cp.save(&cp_path).unwrap();
     assert!(cp_path.exists());
+
+    // 追加 segment 行后仍可正常加载（meta 在首行、segment 折叠正确）
+    use pick_up_sound_text::checkpoint::{SegmentProgress, SegmentStatus};
+    let _ = Checkpoint::append_updates(&cp_path, &[SegmentProgress {
+        segment_id: 0,
+        start_time: Some(0.0),
+        end_time: Some(1.0),
+        status: SegmentStatus::Pending,
+        source: Some("hello".to_string()),
+        translated: None,
+        fallback: false,
+    }]).unwrap();
 
     // 加载 checkpoint 验证
     let loaded = Checkpoint::load(&cp_path).unwrap();
     assert!(loaded.is_some());
     let cp = loaded.unwrap();
     assert_eq!(cp.task_id, session_id);
-    assert!(cp.segments.is_empty());
+    assert_eq!(cp.segments.len(), 1);
+    assert_eq!(cp.segments[0].source.as_deref(), Some("hello"));
 }
 
 #[tokio::test]
