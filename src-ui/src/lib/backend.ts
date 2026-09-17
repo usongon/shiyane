@@ -2,7 +2,18 @@ import { createContext } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { AppConfig, ProgressInfo, RecentTask, TaskStatus } from "./types";
+import type {
+  AppConfig,
+  ProgressInfo,
+  RecentTask,
+  TaskStatus,
+  CaptureTarget,
+  RealtimeStateInfo,
+  SubtitlePartialEvent,
+  SubtitleFinalEvent,
+  TranslationEvent,
+  RealtimeStateEvent,
+} from "./types";
 import { mockBackend } from "./mock";
 
 export interface DragHandlers {
@@ -27,6 +38,19 @@ export interface Backend {
   getTaskStatus(videoPath: string): Promise<TaskStatus>;
   pickVideoFile(): Promise<string | null>;
   onDragEvent(handlers: DragHandlers): Promise<() => void>;
+
+  // Realtime subtitle
+  startRealtime(sourceLanguage: string, targetIds: string[]): Promise<string>;
+  pauseRealtime(): Promise<void>;
+  resumeRealtime(): Promise<void>;
+  stopRealtime(): Promise<void>;
+  listCaptureTargets(): Promise<CaptureTarget[]>;
+  getRealtimeState(): Promise<RealtimeStateInfo>;
+
+  onSubtitlePartial(cb: (e: SubtitlePartialEvent) => void): Promise<() => void>;
+  onSubtitleFinal(cb: (e: SubtitleFinalEvent) => void): Promise<() => void>;
+  onTranslation(cb: (e: TranslationEvent) => void): Promise<() => void>;
+  onRealtimeStateChange(cb: (e: RealtimeStateEvent) => void): Promise<() => void>;
 }
 
 export const BackendContext = createContext<Backend>(mockBackend);
@@ -68,6 +92,31 @@ const tauriBackend: Backend = {
       listen("tauri://drag-leave", () => handlers.onLeave?.()),
     ]);
     return () => unlistens.forEach((u) => u());
+  },
+
+  startRealtime: (sourceLanguage, targetIds) =>
+    invoke<string>("start_realtime_session", { sourceLanguage, captureTargetIds: targetIds }),
+  pauseRealtime: () => invoke<void>("pause_realtime_session"),
+  resumeRealtime: () => invoke<void>("resume_realtime_session"),
+  stopRealtime: () => invoke<void>("stop_realtime_session"),
+  listCaptureTargets: () => invoke<CaptureTarget[]>("list_capture_targets"),
+  getRealtimeState: () => invoke<RealtimeStateInfo>("get_realtime_state"),
+
+  onSubtitlePartial: async (cb) => {
+    const unlisten = await listen<SubtitlePartialEvent>("realtime:subtitle-partial", (e) => cb(e.payload));
+    return unlisten;
+  },
+  onSubtitleFinal: async (cb) => {
+    const unlisten = await listen<SubtitleFinalEvent>("realtime:subtitle-final", (e) => cb(e.payload));
+    return unlisten;
+  },
+  onTranslation: async (cb) => {
+    const unlisten = await listen<TranslationEvent>("realtime:translation", (e) => cb(e.payload));
+    return unlisten;
+  },
+  onRealtimeStateChange: async (cb) => {
+    const unlisten = await listen<RealtimeStateEvent>("realtime:state-change", (e) => cb(e.payload));
+    return unlisten;
   },
 };
 

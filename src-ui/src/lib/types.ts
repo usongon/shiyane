@@ -53,6 +53,7 @@ export interface RecentTask {
   modified_at: number;
   state: RecentTaskState;
   percent: number;
+  task_type: "file" | "realtime";
 }
 
 export interface TaskStatus {
@@ -84,4 +85,51 @@ export function defaultConfig(): AppConfig {
     },
     oss: null,
   };
+}
+
+// Realtime subtitle types
+export interface CaptureTarget {
+  id: string;
+  name: string;
+  kind: "system_audio" | "microphone";
+  icon_path: string | null;
+}
+
+export interface RealtimeStateInfo {
+  state: "idle" | "connecting" | "listening" | "paused" | "reconnecting" | "stopped" | "failed";
+  session_id: string | null;
+  entry_count: number;
+  error: string | null;
+}
+
+export interface SubtitleEntry {
+  content_start: number;
+  content_end: number;
+  wall_start: number;
+  wall_end: number;
+  source: string;
+  translated: string;
+  status: "partial" | "final" | "refined";
+}
+
+export interface SubtitlePartialEvent {
+  entry_index: number;
+  source: string;
+  ts_start: number;
+  ts_end: number;
+}
+
+export interface SubtitleFinalEvent {
+  entry_index: number;
+  entry: SubtitleEntry;
+}
+
+export interface TranslationEvent {
+  entry_index: number;
+  translated: string;
+}
+
+export interface RealtimeStateEvent {
+  state: RealtimeStateInfo["state"];
+  session_id: string | null;
 }
