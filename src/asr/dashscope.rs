@@ -49,6 +49,21 @@ impl AsrProvider for DashScopeAsrProvider {
         let (mut write, mut read) = ws_stream.split();
         
         // Send run-task message
+        // 参数对齐 Qwen-Audio-ASR-Streaming 官方 schema：
+        // https://help.aliyun.com/zh/model-studio/fun-asr-client-events
+        // - 不传旧版字段（punctuation_prediction_enabled 等，会报 InvalidParameter）
+        // - language_hints 只接受语种码，auto 时省略让模型自判
+        // - heartbeat 保活，避免静音期被服务端断连
+        let mut parameters = json!({
+            "format": "pcm",
+            "sample_rate": 16000,
+            "semantic_punctuation_enabled": false,
+            "max_sentence_silence": 1300,
+            "heartbeat": true
+        });
+        if config.language != "auto" && !config.language.is_empty() {
+            parameters["language_hints"] = json!([config.language]);
+        }
         let run_task = json!({
             "header": {
                 "action": "run-task",
@@ -61,15 +76,7 @@ impl AsrProvider for DashScopeAsrProvider {
                 "function": "recognition",
                 "model": config.model,
                 "input": {},
-                "parameters": {
-                    "format": "pcm",
-                    "sample_rate": 16000,
-                    "language_hints": [config.language],
-                    "semantic_punctuation_enabled": false,
-                    "max_sentence_silence": 1300,
-                    "punctuation_prediction_enabled": true,
-                    "inverse_text_normalization_enabled": true
-                }
+                "parameters": parameters
             }
         });
         

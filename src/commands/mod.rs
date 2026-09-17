@@ -655,4 +655,6 @@ pub struct RealtimeSessionInner {
     pub cancel_token: Option<CancellationToken>,
     pub session_id: Option<String>,
     pub state: pick_up_sound_text::pipeline::realtime::RealtimeState,
+    /// 进入 failed 态的原因，供 get_realtime_state 轮询返回
+    pub last_error: Option<String>,
 }

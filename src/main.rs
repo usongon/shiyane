@@ -39,6 +39,7 @@ fn main() {
             cancel_token: None,
             session_id: None,
             state: pick_up_sound_text::pipeline::realtime::RealtimeState::Idle,
+            last_error: None,
         })),
     };
 

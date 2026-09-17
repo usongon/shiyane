@@ -35,11 +35,17 @@ pub async fn start_realtime_session(
 ) -> Result<String, String> {
     tracing::info!("start_realtime_session: language={}, targets={:?}", source_language, capture_target_ids);
 
-    // 检查是否已有活跃会话（failed 也允许重启——失败后点「新建会话」是主路径）
+    // 检查是否已有活跃会话（failed 也允许重启——失败后点「新建会话」是主路径）。
+    // 优先读 pipeline 内部状态：inner.state 是命令层的镜像，ASR 中途失败只反映在 pipeline 里
     let realtime = state.realtime.lock().await;
-    if realtime.state != RealtimeState::Idle
-        && realtime.state != RealtimeState::Stopped
-        && !matches!(realtime.state, RealtimeState::Failed(_))
+    let current = if let Some(pipeline) = &realtime.pipeline {
+        pipeline.get_state().await
+    } else {
+        realtime.state.clone()
+    };
+    if current != RealtimeState::Idle
+        && current != RealtimeState::Stopped
+        && current != RealtimeState::Failed
     {
         return Err("已有活跃的实时会话".to_string());
     }
@@ -97,6 +103,7 @@ pub async fn start_realtime_session(
     realtime.cancel_token = Some(cancel_token);
     realtime.session_id = Some(session_id.clone());
     realtime.state = RealtimeState::Connecting;
+    realtime.last_error = None;
     drop(realtime);
 
     // 启动 pipeline（在后台 task 中）；失败必须 emit 事件——invoke 已返回，
@@ -109,7 +116,8 @@ pub async fn start_realtime_session(
         if let Some(pipeline) = realtime.pipeline.as_mut() {
             if let Err(e) = pipeline.start(app_handle.clone()).await {
                 tracing::error!("Realtime pipeline error: {}", e);
-                realtime.state = RealtimeState::Failed(e.to_string());
+                realtime.state = RealtimeState::Failed;
+                realtime.last_error = Some(e.to_string());
                 use tauri::Emitter;
                 let _ = app_handle.emit(
                     "realtime:state-change",
@@ -181,14 +189,25 @@ pub async fn list_capture_targets(_state: State<'_, AppState>) -> Result<Vec<Cap
 #[tauri::command]
 pub async fn get_realtime_state(state: State<'_, AppState>) -> Result<RealtimeStateInfo, String> {
     let realtime = state.realtime.lock().await;
-    let (state_str, error) = match &realtime.state {
-        RealtimeState::Idle => ("idle", None),
-        RealtimeState::Connecting => ("connecting", None),
-        RealtimeState::Listening => ("listening", None),
-        RealtimeState::Paused => ("paused", None),
-        RealtimeState::Reconnecting => ("reconnecting", None),
-        RealtimeState::Stopped => ("stopped", None),
-        RealtimeState::Failed(e) => ("failed", Some(e.clone())),
+    // pipeline 存在时读其内部状态（真实态）；否则退回命令层镜像（如启动前的 connecting）
+    let current = if let Some(pipeline) = &realtime.pipeline {
+        pipeline.get_state().await
+    } else {
+        realtime.state.clone()
+    };
+    let state_str = match &current {
+        RealtimeState::Idle => "idle",
+        RealtimeState::Connecting => "connecting",
+        RealtimeState::Listening => "listening",
+        RealtimeState::Paused => "paused",
+        RealtimeState::Reconnecting => "reconnecting",
+        RealtimeState::Stopped => "stopped",
+        RealtimeState::Failed => "failed",
+    };
+    let error = if current == RealtimeState::Failed {
+        realtime.last_error.clone()
+    } else {
+        None
     };
 
     let entry_count = if let Some(pipeline) = &realtime.pipeline {

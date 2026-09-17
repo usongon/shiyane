@@ -16,9 +16,19 @@ fn realtime_state_serialization() {
     let json = serde_json::to_string(&state).unwrap();
     assert_eq!(json, "\"listening\"");
 
-    let state = RealtimeState::Failed("test error".to_string());
+    // unit variant 必须序列化为纯字符串；newtype 会变成 {"failed": "..."} 对象，
+    // 前端按字符串比较状态会失配（灰点 bug 的根因之一）
+    let state = RealtimeState::Failed;
     let json = serde_json::to_string(&state).unwrap();
-    assert!(json.contains("failed"));
+    assert_eq!(json, "\"failed\"");
+
+    let event = pick_up_sound_text::pipeline::realtime::RealtimeStateEvent::failed(
+        "boom".to_string(),
+        Some("s1".to_string()),
+    );
+    let json = serde_json::to_string(&event).unwrap();
+    assert!(json.contains("\"state\":\"failed\""));
+    assert!(json.contains("\"error\":\"boom\""));
 }
 
 #[test]

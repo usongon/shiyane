@@ -27,7 +27,7 @@ pub enum RealtimeState {
     Paused,
     Reconnecting,
     Stopped,
-    Failed(String),
+    Failed,
 }
 
 #[derive(Debug, Clone)]
@@ -357,8 +357,10 @@ impl RealtimePipeline {
                                 if let Err(e) = asr_stream.send_audio(&samples).await {
                                     tracing::error!("Failed to send audio to ASR: {}", e);
                                     let mut state = state.lock().await;
-                                    *state = RealtimeState::Failed(format!("ASR send error: {}", e));
+                                    *state = RealtimeState::Failed;
                                     drop(state);
+                                    let _ = app_handle.emit("realtime:state-change",
+                                        RealtimeStateEvent::failed(format!("ASR send error: {}", e), None));
                                     break;
                                 }
                             }
@@ -447,10 +449,10 @@ impl RealtimePipeline {
                             Ok(AsrEvent::Error { code, message }) => {
                                 tracing::error!("ASR error: {} - {}", code, message);
                                 let mut state = state.lock().await;
-                                *state = RealtimeState::Failed(format!("ASR error: {}", message));
+                                *state = RealtimeState::Failed;
                                 drop(state);
                                 let _ = app_handle.emit("realtime:state-change",
-                                    RealtimeStateEvent::failed(message.clone(), None));
+                                    RealtimeStateEvent::failed(format!("ASR error: {}", message), None));
                                 break;
                             }
                             Ok(AsrEvent::EndOfStream) => {
@@ -460,7 +462,7 @@ impl RealtimePipeline {
                             Err(e) => {
                                 tracing::error!("ASR stream error: {}", e);
                                 let mut state = state.lock().await;
-                                *state = RealtimeState::Failed(e.to_string());
+                                *state = RealtimeState::Failed;
                                 drop(state);
                                 let _ = app_handle.emit("realtime:state-change",
                                     RealtimeStateEvent::failed(e.to_string(), None));
@@ -600,7 +602,7 @@ impl RealtimeStateEvent {
 
     pub fn failed(message: String, session_id: Option<String>) -> Self {
         Self {
-            state: RealtimeState::Failed(message.clone()),
+            state: RealtimeState::Failed,
             session_id,
             error: Some(message),
         }

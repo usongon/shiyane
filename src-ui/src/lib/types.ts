@@ -77,7 +77,7 @@ export function defaultConfig(): AppConfig {
       api_key: "",
       workspace_id: null,
       file_model: "qwen-audio-3.0-asr-flash-filetrans",
-      realtime_model: "qwen-audio-3.0-asr-flash",
+      realtime_model: "qwen-audio-3.0-asr-flash-streaming",
     },
     translate: {
       provider: "openai",
