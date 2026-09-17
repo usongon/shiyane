@@ -100,7 +100,7 @@ impl AsrProvider for DashScopeAsrProvider {
                                         // Task is ready to receive audio; no event needed.
                                     }
                                     "result-generated" => {
-                                        tracing::info!("DashScope result-generated raw JSON: {}", serde_json::to_string_pretty(&json).unwrap_or_default());
+                                        tracing::debug!("DashScope result-generated raw JSON: {}", serde_json::to_string_pretty(&json).unwrap_or_default());
                                         
                                         if let Some(sentence) = json["payload"]["output"]["sentence"].as_object() {
                                             let text = sentence["text"].as_str().unwrap_or("").to_string();
@@ -108,7 +108,7 @@ impl AsrProvider for DashScopeAsrProvider {
                                             let end_time = sentence["end_time"].as_f64().unwrap_or(0.0) / 1000.0;
                                             let sentence_end = sentence["sentence_end"].as_bool().unwrap_or(false);
                                             
-                                            tracing::info!("Parsed sentence: text='{}' ({} chars), begin={}, end={}, sentence_end={}", text, text.len(), begin_time, end_time, sentence_end);
+                                            tracing::debug!("Parsed sentence: text='{}' ({} chars), begin={}, end={}, sentence_end={}", text, text.len(), begin_time, end_time, sentence_end);
                                             
                                             if sentence_end {
                                                 let _ = tx.send(Ok(AsrEvent::Final {
@@ -183,7 +183,7 @@ impl AsrStream for DashScopeAsrStream {
         // Log first call details to verify audio data
         if pcm.len() > 0 {
             let non_zero_count = pcm.iter().filter(|&&s| s != 0).count();
-            tracing::info!("Sending audio: {} samples ({} bytes), {} non-zero samples, first 10: {:?}", 
+            tracing::debug!("Sending audio: {} samples ({} bytes), {} non-zero samples, first 10: {:?}", 
                 pcm.len(), bytes.len(), non_zero_count, &pcm[..std::cmp::min(10, pcm.len())]);
         }
         

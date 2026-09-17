@@ -538,11 +538,17 @@ impl RealtimePipeline {
                                     }
                                     Err(e) => {
                                         tracing::warn!("Translation failed for entry {}: {}", entry_index, e);
+                                        let marker = "[翻译失败]".to_string();
                                         let mut entries = finalized_entries.lock().await;
                                         if let Some(entry) = entries.get_mut(entry_index) {
-                                            entry.translated = "[翻译失败]".to_string();
+                                            entry.translated = marker.clone();
                                         }
                                         drop(entries);
+                                        // 失败也必须发事件，否则前端翻译栏永远空白、无从感知
+                                        let _ = app_handle.emit("realtime:translation", TranslationEvent {
+                                            entry_index,
+                                            translated: marker,
+                                        });
                                     }
                                 }
                             }

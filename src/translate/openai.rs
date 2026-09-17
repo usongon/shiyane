@@ -37,6 +37,33 @@ pub struct OpenAiCompatibleProvider {
     pub timeout_secs: u64,
 }
 
+impl OpenAiCompatibleProvider {
+    /// DashScope qwen3.5+ 系列默认开启思考模式：非流式请求会等服务端完成完整推理
+    /// （可达分钟级），对字幕翻译这类短输出是纯延迟，必须显式关闭。
+    /// enable_thinking 是 DashScope 的私有扩展参数，按端点域判定，其余 OpenAI 兼容端点不发送。
+    fn disables_thinking(&self) -> bool {
+        self.base_url.contains("dashscope")
+    }
+
+    fn build_body(
+        &self,
+        messages: Vec<serde_json::Value>,
+        temperature: f64,
+        max_tokens: u32,
+    ) -> serde_json::Value {
+        let mut body = json!({
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        });
+        if self.disables_thinking() {
+            body["enable_thinking"] = json!(false);
+        }
+        body
+    }
+}
+
 #[async_trait]
 impl TranslateProvider for OpenAiCompatibleProvider {
     async fn translate(&self, req: TranslateRequest) -> Result<TranslateResponse> {
@@ -76,12 +103,7 @@ impl TranslateProvider for OpenAiCompatibleProvider {
         ];
 
         // Build request body (OpenAI Chat Completions format)
-        let body = json!({
-            "model": self.model,
-            "messages": messages,
-            "temperature": 0.3,
-            "max_tokens": 500
-        });
+        let body = self.build_body(messages, 0.3, 500);
 
         // Send request, retrying transient network errors (timeouts, dropped
         // connections). API-level errors are returned as-is without retry.
@@ -157,16 +179,14 @@ impl TranslateProvider for OpenAiCompatibleProvider {
         let client = build_client(self.timeout_secs);
 
         // Send minimal test request
-        let body = json!({
-            "model": self.model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "hi"
-                }
-            ],
-            "max_tokens": 1
-        });
+        let body = self.build_body(
+            vec![json!({
+                "role": "user",
+                "content": "hi"
+            })],
+            0.3,
+            1,
+        );
 
         let response = client
             .post(format!("{}/chat/completions", self.base_url))
@@ -200,6 +220,32 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn provider_with_base(base_url: &str) -> OpenAiCompatibleProvider {
+        OpenAiCompatibleProvider {
+            base_url: base_url.to_string(),
+            model: "qwen3.8-max".to_string(),
+            api_key: "key".to_string(),
+            timeout_secs: 1,
+        }
+    }
+
+    // qwen3.5+ 默认开思考：非流式请求要等服务端推理完（分钟级），60s 客户端超时
+    // 会被掐死——DashScope 端点必须显式 enable_thinking=false
+    #[test]
+    fn dashscope_body_disables_thinking() {
+        let p = provider_with_base("https://dashscope.aliyuncs.com/compatible-mode/v1");
+        let body = p.build_body(vec![json!({"role": "user", "content": "hi"})], 0.3, 500);
+        assert_eq!(body["enable_thinking"], json!(false));
+    }
+
+    // enable_thinking 是 DashScope 私有扩展，其余 OpenAI 兼容端点不发送未知字段
+    #[test]
+    fn openai_body_omits_thinking_param() {
+        let p = provider_with_base("https://api.openai.com/v1");
+        let body = p.build_body(vec![json!({"role": "user", "content": "hi"})], 0.3, 500);
+        assert!(body.get("enable_thinking").is_none());
+    }
 
     // Regression: a server that accepts connections but never responds must
     // produce an error within a bounded time (timeout + retries), not hang.
