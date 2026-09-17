@@ -575,10 +575,8 @@ body {
 /* —— 悬浮字幕窗口 —— */
 
 .overlay-container {
-  height: 100vh;
   display: flex;
   flex-direction: column;
-  justify-content: flex-end;
   padding: 12px 16px;
   background: rgba(0, 0, 0, 0.6);
   backdrop-filter: blur(20px);

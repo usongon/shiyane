@@ -1,4 +1,6 @@
-import { useContext, useEffect, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { LogicalSize } from "@tauri-apps/api/dpi";
 import { BackendContext } from "../lib/backend";
 import { getOverlayOpacity } from "../lib/overlay-style";
 import type { SubtitleEntry } from "../lib/types";
@@ -8,12 +10,14 @@ interface OverlayLine {
   entry: SubtitleEntry;
 }
 
-/** 悬浮字幕窗：歌词条式，最近 2 句原文+译文，末尾跟实时口述行 */
+/** 悬浮字幕窗：歌词条式，最近 3 句原文+译文，末尾跟实时口述行。
+ *  窗口高度跟随内容自动伸缩，从根上杜绝溢出裁切。 */
 export default function OverlayPage() {
   const backend = useContext(BackendContext);
   const [lines, setLines] = useState<OverlayLine[]>([]);
   const [partial, setPartial] = useState("");
   const [opacity, setOpacity] = useState(getOverlayOpacity);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   // 主窗设置里拖动滑杆 → storage 事件实时同步到悬浮窗
   useEffect(() => {
@@ -24,6 +28,16 @@ export default function OverlayPage() {
     return () => window.removeEventListener("storage", onStorage);
   }, []);
 
+  // 内容变化后自动调整窗口高度（封顶 500px）
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const height = Math.min(Math.max(el.offsetHeight, 60), 500);
+    getCurrentWindow()
+      .setSize(new LogicalSize(600, height))
+      .catch(() => {});
+  }, [lines, partial]);
+
   useEffect(() => {
     let unlistenFinal: (() => void) | null = null;
     let unlistenTranslation: (() => void) | null = null;
@@ -31,8 +45,7 @@ export default function OverlayPage() {
     let unlistenState: (() => void) | null = null;
 
     backend.onSubtitleFinal((e) => {
-      // 只保留最新一句：长句换行后多条目必然超出窗口高度（曾致底部译文被裁）
-      setLines([{ index: e.entry_index, entry: e.entry }]);
+      setLines((prev) => [...prev.slice(-2), { index: e.entry_index, entry: e.entry }]);
       setPartial("");
     }).then((fn) => { unlistenFinal = fn; });
 
@@ -68,6 +81,7 @@ export default function OverlayPage() {
 
   return (
     <div
+      ref={containerRef}
       className="overlay-container"
       data-tauri-drag-region
       style={{ background: `rgba(0, 0, 0, ${opacity})` }}
