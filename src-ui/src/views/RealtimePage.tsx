@@ -222,12 +222,7 @@ export default function RealtimePage({ active }: { active: boolean }) {
                 >
                   {targets.map((t) => (
                     <div key={t.id} className="realtime-target-row">
-                      <Checkbox value={t.id}>
-                        {t.name}
-                        <span className="realtime-target-kind">
-                          {t.kind === "system_audio" ? "系统音频" : "麦克风"}
-                        </span>
-                      </Checkbox>
+                      <Checkbox value={t.id}>{t.name}</Checkbox>
                     </div>
                   ))}
                 </Checkbox.Group>
