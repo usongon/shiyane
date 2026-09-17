@@ -186,6 +186,7 @@ async fn realtime_checkpoint_with_segments() {
         status: pick_up_sound_text::checkpoint::SegmentStatus::Pending,
         source: Some("hello world".to_string()),
         translated: None,
+        fallback: false,
     };
     Checkpoint::append_updates(&cp_path, &[seg]).unwrap();
 

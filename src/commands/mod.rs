@@ -471,23 +471,26 @@ pub async fn get_task_status(
             .join("progress.jsonl");
 
         let cp = match Checkpoint::load(&cp_path).map_err(|e| e.to_string())? {
-            None => return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0, source_language: None }),
+            None => return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0, source_language: None, fallback_count: None }),
             Some(c) => c,
         };
 
         if cp.segments.is_empty() {
-            return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0, source_language: None });
+            return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0, source_language: None, fallback_count: None });
         } else if cp.is_all_completed() {
+            let fallback_count = cp.segments.iter().filter(|s| s.fallback).count();
             return Ok(TaskStatus {
                 state: TaskState::Completed,
                 percent: 1.0,
                 source_language: Some(cp.fingerprint.source_language.clone()),
+                fallback_count: (fallback_count > 0).then_some(fallback_count),
             });
         } else {
             return Ok(TaskStatus {
                 state: TaskState::Translating,
                 percent: cp.percent(),
                 source_language: Some(cp.fingerprint.source_language.clone()),
+                fallback_count: None,
             });
         }
     }

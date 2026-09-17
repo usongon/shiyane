@@ -433,6 +433,7 @@ impl RealtimePipeline {
                                         status: SegmentStatus::Pending,
                                         source: Some(text),
                                         translated: None,
+                                        fallback: false,
                                     };
                                     let _ = Checkpoint::append_updates(cp_path, &[seg]);
                                 }
@@ -522,6 +523,7 @@ impl RealtimePipeline {
                                                 status: SegmentStatus::Completed,
                                                 source: None,
                                                 translated: Some(resp.translated_text),
+                                                fallback: false,
                                             };
                                             let _ = Checkpoint::append_updates(cp_path, &[seg]);
                                         }
