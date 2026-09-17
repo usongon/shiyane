@@ -19,6 +19,18 @@
         "minHeight": 500,
         "titleBarStyle": "Overlay",
         "dragDropEnabled": true
+      },
+      {
+        "label": "subtitle-overlay",
+        "title": "",
+        "width": 600,
+        "height": 120,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "decorations": false,
+        "resizable": true,
+        "visible": false
       }
     ],
     "security": {
