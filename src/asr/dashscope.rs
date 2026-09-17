@@ -58,7 +58,7 @@ impl AsrProvider for DashScopeAsrProvider {
             "format": "pcm",
             "sample_rate": 16000,
             "semantic_punctuation_enabled": false,
-            "max_sentence_silence": 800,
+            "max_sentence_silence": 1000,
             "heartbeat": true
         });
         if config.language != "auto" && !config.language.is_empty() {

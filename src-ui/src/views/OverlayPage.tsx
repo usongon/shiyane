@@ -1,5 +1,6 @@
 import { useContext, useEffect, useState } from "react";
 import { BackendContext } from "../lib/backend";
+import { getOverlayOpacity } from "../lib/overlay-style";
 import type { SubtitleEntry } from "../lib/types";
 
 interface OverlayLine {
@@ -7,11 +8,21 @@ interface OverlayLine {
   entry: SubtitleEntry;
 }
 
-/** 悬浮字幕窗：歌词条式，最近几句原文+译文，末尾跟实时口述行 */
+/** 悬浮字幕窗：歌词条式，最近 2 句原文+译文，末尾跟实时口述行 */
 export default function OverlayPage() {
   const backend = useContext(BackendContext);
   const [lines, setLines] = useState<OverlayLine[]>([]);
   const [partial, setPartial] = useState("");
+  const [opacity, setOpacity] = useState(getOverlayOpacity);
+
+  // 主窗设置里拖动滑杆 → storage 事件实时同步到悬浮窗
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === "overlayBackgroundOpacity") setOpacity(getOverlayOpacity());
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
 
   useEffect(() => {
     let unlistenFinal: (() => void) | null = null;
@@ -20,7 +31,7 @@ export default function OverlayPage() {
     let unlistenState: (() => void) | null = null;
 
     backend.onSubtitleFinal((e) => {
-      setLines((prev) => [...prev.slice(-2), { index: e.entry_index, entry: e.entry }]);
+      setLines((prev) => [...prev.slice(-1), { index: e.entry_index, entry: e.entry }]);
       setPartial("");
     }).then((fn) => { unlistenFinal = fn; });
 
@@ -55,7 +66,11 @@ export default function OverlayPage() {
   }, [backend]);
 
   return (
-    <div className="overlay-container" data-tauri-drag-region>
+    <div
+      className="overlay-container"
+      data-tauri-drag-region
+      style={{ background: `rgba(0, 0, 0, ${opacity})` }}
+    >
       {lines.map((l) => (
         <div key={l.index} className="overlay-line">
           <div className="overlay-source">{l.entry.source}</div>
