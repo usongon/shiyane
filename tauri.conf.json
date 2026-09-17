@@ -25,7 +25,7 @@
         "title": "",
         "url": "/?window=overlay",
         "width": 600,
-        "height": 170,
+        "height": 190,
         "transparent": true,
         "alwaysOnTop": true,
         "skipTaskbar": true,

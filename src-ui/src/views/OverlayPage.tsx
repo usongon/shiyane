@@ -31,7 +31,8 @@ export default function OverlayPage() {
     let unlistenState: (() => void) | null = null;
 
     backend.onSubtitleFinal((e) => {
-      setLines((prev) => [...prev.slice(-1), { index: e.entry_index, entry: e.entry }]);
+      // 只保留最新一句：长句换行后多条目必然超出窗口高度（曾致底部译文被裁）
+      setLines([{ index: e.entry_index, entry: e.entry }]);
       setPartial("");
     }).then((fn) => { unlistenFinal = fn; });
 
