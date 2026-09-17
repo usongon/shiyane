@@ -46,6 +46,7 @@ export interface Backend {
   stopRealtime(): Promise<void>;
   listCaptureTargets(): Promise<CaptureTarget[]>;
   getRealtimeState(): Promise<RealtimeStateInfo>;
+  toggleRealtimeOverlay(): Promise<boolean>;
 
   onSubtitlePartial(cb: (e: SubtitlePartialEvent) => void): Promise<() => void>;
   onSubtitleFinal(cb: (e: SubtitleFinalEvent) => void): Promise<() => void>;
@@ -101,6 +102,7 @@ const tauriBackend: Backend = {
   stopRealtime: () => invoke<void>("stop_realtime_session"),
   listCaptureTargets: () => invoke<CaptureTarget[]>("list_capture_targets"),
   getRealtimeState: () => invoke<RealtimeStateInfo>("get_realtime_state"),
+  toggleRealtimeOverlay: () => invoke<boolean>("toggle_realtime_overlay"),
 
   onSubtitlePartial: async (cb) => {
     const unlisten = await listen<SubtitlePartialEvent>("realtime:subtitle-partial", (e) => cb(e.payload));

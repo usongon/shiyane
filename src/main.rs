@@ -81,6 +81,11 @@ fn main() {
 
                     drop(realtime);
 
+                    // 主窗关闭时一并收起悬浮字幕窗，否则进程会因仍有窗口而驻留
+                    if let Some(overlay) = app_handle.get_webview_window("subtitle-overlay") {
+                        let _ = overlay.hide();
+                    }
+
                     // 清理完毕，允许关闭
                     if let Some(window) = app_handle.get_webview_window("main") {
                         let _ = window.close();
@@ -107,6 +112,7 @@ fn main() {
             commands::realtime::stop_realtime_session,
             commands::realtime::list_capture_targets,
             commands::realtime::get_realtime_state,
+            commands::realtime::toggle_realtime_overlay,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

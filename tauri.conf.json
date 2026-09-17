@@ -23,6 +23,7 @@
       {
         "label": "subtitle-overlay",
         "title": "",
+        "url": "/?window=overlay",
         "width": 600,
         "height": 120,
         "transparent": true,

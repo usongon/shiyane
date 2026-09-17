@@ -171,6 +171,24 @@ pub async fn stop_realtime_session(state: State<'_, AppState>) -> Result<(), Str
     Ok(())
 }
 
+/// 呼出/收起悬浮字幕窗（subtitle-overlay），返回操作后的可见状态
+#[tauri::command]
+pub fn toggle_realtime_overlay(app: tauri::AppHandle) -> Result<bool, String> {
+    use tauri::Manager;
+    let win = app
+        .get_webview_window("subtitle-overlay")
+        .ok_or_else(|| "悬浮字幕窗口未创建".to_string())?;
+    let visible = win.is_visible().map_err(|e| e.to_string())?;
+    if visible {
+        win.hide().map_err(|e| e.to_string())?;
+        Ok(false)
+    } else {
+        win.show().map_err(|e| e.to_string())?;
+        win.set_focus().map_err(|e| e.to_string())?;
+        Ok(true)
+    }
+}
+
 #[tauri::command]
 pub async fn list_capture_targets(_state: State<'_, AppState>) -> Result<Vec<CaptureTargetInfo>, String> {
     let capture_source = create_capture_source();

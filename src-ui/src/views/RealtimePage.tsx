@@ -4,12 +4,14 @@ import {
   Button,
   Checkbox,
   Select,
+  Tooltip,
   Typography,
 } from "antd";
 import {
   AudioOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
+  PushpinOutlined,
   ReloadOutlined,
   StopOutlined,
 } from "@ant-design/icons";
@@ -58,6 +60,7 @@ export default function RealtimePage({ active }: { active: boolean }) {
   const [currentPartial, setCurrentPartial] = useState<string>("");
   const [lastError, setLastError] = useState<string | null>(null);
   const [, setSessionId] = useState<string | null>(null);
+  const [overlayOn, setOverlayOn] = useState(false);
 
   const listRef = useRef<HTMLDivElement>(null);
   const autoScrollRef = useRef(true);
@@ -187,6 +190,14 @@ export default function RealtimePage({ active }: { active: boolean }) {
     setCurrentPartial("");
   };
 
+  const onToggleOverlay = async () => {
+    try {
+      setOverlayOn(await backend.toggleRealtimeOverlay());
+    } catch (e) {
+      message.error(`悬浮字幕切换失败：${e}`);
+    }
+  };
+
   const formatTime = (seconds: number): string => {
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
@@ -258,6 +269,15 @@ export default function RealtimePage({ active }: { active: boolean }) {
               <span className="realtime-status-text">{STATUS_TEXT[state]}</span>
             </div>
             <div className="realtime-actions">
+              <Tooltip title={overlayOn ? "收起悬浮字幕" : "悬浮字幕（置顶歌词条）"}>
+                <Button
+                  type={overlayOn ? "primary" : "default"}
+                  shape="circle"
+                  icon={<PushpinOutlined />}
+                  onClick={onToggleOverlay}
+                  aria-label="悬浮字幕"
+                />
+              </Tooltip>
               {isListening && (
                 <Button icon={<PauseCircleOutlined />} onClick={onPause}>
                   暂停

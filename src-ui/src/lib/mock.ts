@@ -192,6 +192,9 @@ export const mockBackend: Backend = {
   async getRealtimeState(): Promise<RealtimeStateInfo> {
     return { state: "idle", session_id: null, entry_count: 0, error: null };
   },
+  async toggleRealtimeOverlay(): Promise<boolean> {
+    return true;
+  },
 
   async onSubtitlePartial(_cb) {
     return () => {};
