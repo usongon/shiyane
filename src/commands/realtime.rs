@@ -48,7 +48,7 @@ pub async fn start_realtime_session(
     let session_id = format!("realtime-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
 
     // 创建 providers
-    let capture_source = create_capture_source();
+    let mut capture_source = create_capture_source();
     let asr_provider = DashScopeAsrProvider;
     let (base_url, _) = translate_provider_preset(&config.translate.provider);
     let translate_provider = Arc::new(OpenAiCompatibleProvider {
@@ -57,6 +57,13 @@ pub async fn start_realtime_session(
         api_key: config.translate.api_key.clone(),
         timeout_secs: 60,
     });
+
+    // 先测试音频采集是否可用（快速失败，不进入后台 task）
+    if let Err(e) = capture_source.start(&capture_target_ids).await {
+        return Err(format!("音频采集启动失败：{}", e));
+    }
+    // 测试成功后停止，等 pipeline 正式启动时再重新 start
+    let _ = capture_source.stop().await;
 
     // 创建 pipeline
     let mut pipeline = RealtimePipeline::new(
