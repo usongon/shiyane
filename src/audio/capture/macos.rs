@@ -513,8 +513,9 @@ impl CaptureSource for MacOSCaptureSource {
                     let pid = app.process_id();
                     if !name.is_empty() {
                         targets.push(CaptureTarget {
+                            // PID 只进 id（选择键），不进展示名——用户不关心
                             id: format!("system:{}", pid),
-                            name: format!("{} (PID: {})", name, pid),
+                            name,
                             kind: CaptureKind::SystemAudio,
                             icon_path: None,
                         });

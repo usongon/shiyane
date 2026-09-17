@@ -497,12 +497,31 @@ body {
   animation: pulse 2s infinite;
 }
 
+.realtime-status-dot.connecting,
+.realtime-status-dot.reconnecting {
+  background: #6366f1;
+  animation: pulse 1.2s infinite;
+}
+
 .realtime-status-dot.paused {
   background: #f59e0b;
 }
 
 .realtime-status-dot.stopped {
   background: #9ca3af;
+}
+
+.realtime-status-dot.failed {
+  background: #ef4444;
+}
+
+.realtime-error {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(239, 68, 68, 0.08);
+  border-left: 3px solid #ef4444;
+  overflow-wrap: anywhere;
 }
 
 @keyframes pulse {

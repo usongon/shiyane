@@ -136,6 +136,7 @@ async fn realtime_pipeline_processes_audio_to_subtitles() {
         AppConfig::default(),
         "en".to_string(),
         "test-session".to_string(),
+        vec![],
     );
 
     assert_eq!(pipeline.get_state().await, RealtimeState::Idle);

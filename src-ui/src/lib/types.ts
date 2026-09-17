@@ -134,4 +134,6 @@ export interface TranslationEvent {
 export interface RealtimeStateEvent {
   state: RealtimeStateInfo["state"];
   session_id: string | null;
+  /** 进入 failed 态时的错误详情 */
+  error?: string | null;
 }

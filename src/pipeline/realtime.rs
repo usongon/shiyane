@@ -45,6 +45,7 @@ pub struct RealtimePipeline {
     config: AppConfig,
     source_language: String,
     session_id: String,
+    capture_target_ids: Vec<String>,
     session_offset_ms: Arc<Mutex<i64>>,
     cancel: CancellationToken,
     capture_source: Option<Box<dyn CaptureSource>>,
@@ -62,6 +63,7 @@ impl RealtimePipeline {
         config: AppConfig,
         source_language: String,
         session_id: String,
+        capture_target_ids: Vec<String>,
     ) -> Self {
         Self {
             state: Arc::new(Mutex::new(RealtimeState::Idle)),
@@ -70,6 +72,7 @@ impl RealtimePipeline {
             config,
             source_language,
             session_id,
+            capture_target_ids,
             session_offset_ms: Arc::new(Mutex::new(0)),
             cancel: CancellationToken::new(),
             capture_source: Some(capture_source),
@@ -89,6 +92,7 @@ impl RealtimePipeline {
             config: AppConfig::default(),
             source_language: "auto".to_string(),
             session_id: "test-session".to_string(),
+            capture_target_ids: Vec::new(),
             session_offset_ms: Arc::new(Mutex::new(0)),
             cancel: CancellationToken::new(),
             capture_source: None,
@@ -165,10 +169,10 @@ impl RealtimePipeline {
             .ok_or_else(|| Error::Asr("ASR provider not initialized".to_string()))?;
         let asr_stream = asr_provider.start_stream(&asr_config).await?;
 
-        // 启动音频采集
+        // 启动音频采集（用户选中的音源；空则由平台实现决定默认行为）
         let capture_source = self.capture_source.as_mut()
             .ok_or_else(|| Error::AudioSource("Capture source not initialized".to_string()))?;
-        let audio_rx = capture_source.start(&[]).await?;
+        let audio_rx = capture_source.start(&self.capture_target_ids.clone()).await?;
 
         // 更新状态
         let mut state = self.state.lock().await;
@@ -176,10 +180,10 @@ impl RealtimePipeline {
         drop(state);
 
         // 发射状态变更事件
-        let _ = app_handle.emit("realtime:state-change", RealtimeStateEvent {
-            state: RealtimeState::Listening,
-            session_id: Some(self.session_id.clone()),
-        });
+        let _ = app_handle.emit("realtime:state-change", RealtimeStateEvent::new(
+            RealtimeState::Listening,
+            Some(self.session_id.clone()),
+        ));
 
         // 启动三并发 task
         let (asr_audio_tx, asr_audio_rx) = mpsc::channel::<Vec<i16>>(100);
@@ -445,10 +449,8 @@ impl RealtimePipeline {
                                 let mut state = state.lock().await;
                                 *state = RealtimeState::Failed(format!("ASR error: {}", message));
                                 drop(state);
-                                let _ = app_handle.emit("realtime:state-change", RealtimeStateEvent {
-                                    state: RealtimeState::Failed(message.clone()),
-                                    session_id: None,
-                                });
+                                let _ = app_handle.emit("realtime:state-change",
+                                    RealtimeStateEvent::failed(message.clone(), None));
                                 break;
                             }
                             Ok(AsrEvent::EndOfStream) => {
@@ -460,6 +462,8 @@ impl RealtimePipeline {
                                 let mut state = state.lock().await;
                                 *state = RealtimeState::Failed(e.to_string());
                                 drop(state);
+                                let _ = app_handle.emit("realtime:state-change",
+                                    RealtimeStateEvent::failed(e.to_string(), None));
                                 break;
                             }
                         }
@@ -584,4 +588,21 @@ pub struct TranslationEvent {
 pub struct RealtimeStateEvent {
     pub state: RealtimeState,
     pub session_id: Option<String>,
+    /// 进入 failed 态时的错误详情，供前端直接展示
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl RealtimeStateEvent {
+    pub fn new(state: RealtimeState, session_id: Option<String>) -> Self {
+        Self { state, session_id, error: None }
+    }
+
+    pub fn failed(message: String, session_id: Option<String>) -> Self {
+        Self {
+            state: RealtimeState::Failed(message.clone()),
+            session_id,
+            error: Some(message),
+        }
+    }
 }

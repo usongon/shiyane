@@ -97,6 +97,7 @@ async fn realtime_checkpoint_save_and_load() {
         AppConfig::default(),
         "en".to_string(),
         session_id.clone(),
+        vec![],
     );
 
     let fingerprint = CheckpointFingerprint {
@@ -159,6 +160,7 @@ async fn realtime_checkpoint_with_segments() {
         AppConfig::default(),
         "en".to_string(),
         session_id.clone(),
+        vec![],
     );
 
     let fingerprint = CheckpointFingerprint {

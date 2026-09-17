@@ -35,9 +35,12 @@ pub async fn start_realtime_session(
 ) -> Result<String, String> {
     tracing::info!("start_realtime_session: language={}, targets={:?}", source_language, capture_target_ids);
 
-    // 检查是否已有活跃会话
+    // 检查是否已有活跃会话（failed 也允许重启——失败后点「新建会话」是主路径）
     let realtime = state.realtime.lock().await;
-    if realtime.state != RealtimeState::Idle && realtime.state != RealtimeState::Stopped {
+    if realtime.state != RealtimeState::Idle
+        && realtime.state != RealtimeState::Stopped
+        && !matches!(realtime.state, RealtimeState::Failed(_))
+    {
         return Err("已有活跃的实时会话".to_string());
     }
     drop(realtime);
@@ -73,6 +76,7 @@ pub async fn start_realtime_session(
         config.clone(),
         source_language.clone(),
         session_id.clone(),
+        capture_target_ids.clone(),
     );
 
     // 初始化 checkpoint
@@ -95,15 +99,25 @@ pub async fn start_realtime_session(
     realtime.state = RealtimeState::Connecting;
     drop(realtime);
 
-    // 启动 pipeline（在后台 task 中）
+    // 启动 pipeline（在后台 task 中）；失败必须 emit 事件——invoke 已返回，
+    // 前端只能靠 state-change 事件拿到失败原因并展示
     let realtime_arc = state.realtime.clone();
     let app_handle = app.clone();
+    let session_id_for_err = session_id.clone();
     let session_task = tokio::spawn(async move {
         let mut realtime = realtime_arc.lock().await;
         if let Some(pipeline) = realtime.pipeline.as_mut() {
-            if let Err(e) = pipeline.start(app_handle).await {
+            if let Err(e) = pipeline.start(app_handle.clone()).await {
                 tracing::error!("Realtime pipeline error: {}", e);
                 realtime.state = RealtimeState::Failed(e.to_string());
+                use tauri::Emitter;
+                let _ = app_handle.emit(
+                    "realtime:state-change",
+                    pick_up_sound_text::pipeline::realtime::RealtimeStateEvent::failed(
+                        e.to_string(),
+                        Some(session_id_for_err),
+                    ),
+                );
             }
         }
     });

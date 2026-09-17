@@ -10,6 +10,7 @@ import {
   AudioOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
+  ReloadOutlined,
   StopOutlined,
 } from "@ant-design/icons";
 import { BackendContext } from "../lib/backend";
@@ -25,6 +26,17 @@ const LANGUAGES = [
   { value: "ja", label: "日文" },
   { value: "ko", label: "韩文" },
 ];
+
+/** 状态 → 状态文字（完整映射，不再用三元兜底掩盖 failed/connecting） */
+const STATUS_TEXT: Record<RealtimeStateInfo["state"], string> = {
+  idle: "未开始",
+  connecting: "连接中…",
+  listening: "正在监听",
+  paused: "已暂停",
+  reconnecting: "重连中…",
+  stopped: "已停止",
+  failed: "出错了",
+};
 
 interface SubtitleLine {
   index: number;
@@ -44,6 +56,7 @@ export default function RealtimePage({ active }: { active: boolean }) {
   const [language, setLanguage] = useState("auto");
   const [subtitles, setSubtitles] = useState<SubtitleLine[]>([]);
   const [currentPartial, setCurrentPartial] = useState<string>("");
+  const [lastError, setLastError] = useState<string | null>(null);
   const [, setSessionId] = useState<string | null>(null);
 
   const listRef = useRef<HTMLDivElement>(null);
@@ -93,6 +106,11 @@ export default function RealtimePage({ active }: { active: boolean }) {
 
     backend.onRealtimeStateChange((e) => {
       setState(e.state);
+      if (e.state === "failed") {
+        setLastError(e.error ?? "未知错误");
+      } else if (e.state === "listening") {
+        setLastError(null);
+      }
       if (e.session_id) setSessionId(e.session_id);
     }).then((fn) => { unlistenState = fn; });
 
@@ -125,8 +143,10 @@ export default function RealtimePage({ active }: { active: boolean }) {
     try {
       const id = await backend.startRealtime(language, selectedTargets);
       setSessionId(id);
-      setState("listening");
+      setLastError(null);
       setSubtitles([]);
+      // 乐观置 connecting；listening 由后端 state-change 事件驱动
+      setState("connecting");
     } catch (e) {
       message.error(`启动失败：${e}`);
     }
@@ -157,6 +177,14 @@ export default function RealtimePage({ active }: { active: boolean }) {
     } catch (e) {
       message.error(`停止失败：${e}`);
     }
+  };
+
+  /** failed/stopped 后的出口：回到设置页重新开始（保留音源与语言选择） */
+  const onNewSession = () => {
+    setState("idle");
+    setLastError(null);
+    setSubtitles([]);
+    setCurrentPartial("");
   };
 
   const formatTime = (seconds: number): string => {
@@ -232,9 +260,7 @@ export default function RealtimePage({ active }: { active: boolean }) {
           <div className="realtime-toolbar">
             <div className="realtime-status">
               <span className={`realtime-status-dot ${state}`} />
-              <span className="realtime-status-text">
-                {isListening ? "正在监听" : isPaused ? "已暂停" : "已停止"}
-              </span>
+              <span className="realtime-status-text">{STATUS_TEXT[state]}</span>
             </div>
             <div className="realtime-actions">
               {isListening && (
@@ -252,8 +278,21 @@ export default function RealtimePage({ active }: { active: boolean }) {
                   停止
                 </Button>
               )}
+              {(state === "failed" || state === "stopped") && (
+                <Button type="primary" icon={<ReloadOutlined />} onClick={onNewSession}>
+                  新建会话
+                </Button>
+              )}
             </div>
           </div>
+
+          {state === "failed" && lastError && (
+            <div className="realtime-error">
+              <Typography.Text type="danger" style={{ fontSize: 12.5 }}>
+                {lastError}
+              </Typography.Text>
+            </div>
+          )}
 
           <div className="realtime-subtitle-list" ref={listRef} onScroll={onScroll}>
             {subtitles.map((line) => (
