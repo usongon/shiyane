@@ -50,6 +50,8 @@ pub struct RecentTask {
     pub modified_at: u64,
     pub state: TaskState,
     pub percent: f64,
+    /// 任务类型：file（文件转字幕）或 realtime（实时会话）
+    pub task_type: String,
 }
 
 pub struct AppState {
@@ -439,6 +441,40 @@ pub async fn get_task_status(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<TaskStatus, String> {
+    // 实时会话：video_path 是 "realtime://session_id"，task_id 就是 session_id
+    if video_path.starts_with("realtime://") {
+        let task_id = video_path.strip_prefix("realtime://").unwrap_or(&video_path);
+        let cp_path = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| e.to_string())?
+            .join("tasks")
+            .join(task_id)
+            .join("progress.jsonl");
+
+        let cp = match Checkpoint::load(&cp_path).map_err(|e| e.to_string())? {
+            None => return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0, source_language: None }),
+            Some(c) => c,
+        };
+
+        if cp.segments.is_empty() {
+            return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0, source_language: None });
+        } else if cp.is_all_completed() {
+            return Ok(TaskStatus {
+                state: TaskState::Completed,
+                percent: 1.0,
+                source_language: Some(cp.fingerprint.source_language.clone()),
+            });
+        } else {
+            return Ok(TaskStatus {
+                state: TaskState::Translating,
+                percent: cp.percent(),
+                source_language: Some(cp.fingerprint.source_language.clone()),
+            });
+        }
+    }
+
+    // 文件任务：原有逻辑
     let path = PathBuf::from(video_path);
     let task_id = match compute_task_id(&path) {
         Ok(id) => id,
@@ -518,10 +554,16 @@ pub async fn list_recent_tasks(app: tauri::AppHandle) -> Result<Vec<RecentTask>,
             continue;
         }
         let video_path = cp.video_path.to_string_lossy().to_string();
-        let file_name = PathBuf::from(&video_path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
+        let (file_name, task_type) = if video_path.starts_with("realtime://") {
+            let display = video_path.strip_prefix("realtime://").unwrap_or(&video_path);
+            (format!("实时会话 {}", display), "realtime".to_string())
+        } else {
+            let name = PathBuf::from(&video_path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            (name, "file".to_string())
+        };
 
         let (state, percent) = if cp.segments.is_empty() {
             (TaskState::Fresh, 0.0)
@@ -538,6 +580,7 @@ pub async fn list_recent_tasks(app: tauri::AppHandle) -> Result<Vec<RecentTask>,
             modified_at,
             state,
             percent,
+            task_type,
         });
     }
 
