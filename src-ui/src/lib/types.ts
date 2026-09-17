@@ -61,6 +61,8 @@ export interface TaskStatus {
   percent: number;
   /** checkpoint 记录的源语言，仅 translating/completed 返回 */
   source_language?: string;
+  /** 翻译重试用尽回退原文的句数，仅 completed 且 >0 时返回 */
+  fallback_count?: number;
 }
 
 export function basename(path: string): string {

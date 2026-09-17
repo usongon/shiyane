@@ -32,6 +32,9 @@ pub struct SegmentProgress {
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub translated: Option<String>,
+    /// 翻译重试用尽后回退原文（完成态提示用；重翻时清零）
+    #[serde(default)]
+    pub fallback: bool,
 }
 
 /// 配置指纹：任一字段变化会使对应阶段的缓存结果失效。
@@ -96,7 +99,10 @@ impl Checkpoint {
         let meta: CheckpointMeta = match serde_json::from_str(meta_line) {
             Ok(m) => m,
             Err(e) => {
-                tracing::warn!("checkpoint meta 行损坏（{e}），归档 {} 并从头开始", path.display());
+                tracing::warn!(
+                    "checkpoint meta 行损坏（{e}），归档 {} 并从头开始",
+                    path.display()
+                );
                 let mut corrupt = path.as_os_str().to_os_string();
                 corrupt.push(".corrupt");
                 let _ = std::fs::rename(path, corrupt);
@@ -171,7 +177,10 @@ impl Checkpoint {
 
     pub fn is_all_completed(&self) -> bool {
         !self.segments.is_empty()
-            && self.segments.iter().all(|s| s.status == SegmentStatus::Completed)
+            && self
+                .segments
+                .iter()
+                .all(|s| s.status == SegmentStatus::Completed)
     }
 
     pub fn percent(&self) -> f64 {
@@ -198,6 +207,7 @@ fn fold_into(existing: &mut SegmentProgress, next: SegmentProgress) {
         existing.translated = next.translated;
     }
     existing.status = next.status;
+    existing.fallback = next.fallback;
 }
 
 /// task_id = FNV-1a(路径 + 文件大小 + mtime 纳秒)。
@@ -236,6 +246,7 @@ mod tests {
             status: SegmentStatus::Pending,
             source: Some("src".into()),
             translated: None,
+            fallback: false,
         };
         let next = SegmentProgress {
             segment_id: 0,
@@ -244,11 +255,35 @@ mod tests {
             status: SegmentStatus::Completed,
             source: None,
             translated: Some("译文".into()),
+            fallback: true,
         };
         fold_into(&mut existing, next);
         assert_eq!(existing.start_time, Some(1.0));
         assert_eq!(existing.source.as_deref(), Some("src"));
         assert_eq!(existing.status, SegmentStatus::Completed);
         assert_eq!(existing.translated.as_deref(), Some("译文"));
+        assert!(existing.fallback, "fallback 标记随最新事件行折叠");
+    }
+
+    #[test]
+    fn old_checkpoint_lines_without_fallback_field_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("progress.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"task_id":"t","video_path":"/v.mp4","fingerprint":{}}"#,
+                "\n",
+                r#"{"segment_id":0,"status":"Completed","source":"a","translated":"甲"}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        let cp = Checkpoint::load(&path).unwrap().unwrap();
+        assert_eq!(cp.completed_count(), 1);
+        assert!(
+            !cp.segments[0].fallback,
+            "旧行无 fallback 字段按 false 加载"
+        );
     }
 }

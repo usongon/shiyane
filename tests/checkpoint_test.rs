@@ -1,5 +1,5 @@
 use pick_up_sound_text::checkpoint::{
-    compute_task_id, Checkpoint, CheckpointFingerprint, SegmentProgress, SegmentStatus,
+    Checkpoint, CheckpointFingerprint, SegmentProgress, SegmentStatus, compute_task_id,
 };
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -22,6 +22,7 @@ fn pending(id: usize, source: &str) -> SegmentProgress {
         status: SegmentStatus::Pending,
         source: Some(source.to_string()),
         translated: None,
+        fallback: false,
     }
 }
 
@@ -33,6 +34,7 @@ fn completed_update(id: usize, translated: &str) -> SegmentProgress {
         status: SegmentStatus::Completed,
         source: None,
         translated: Some(translated.to_string()),
+        fallback: false,
     }
 }
 
@@ -70,8 +72,18 @@ fn test_fold_update_line_overrides_pending_line() {
         r#"{"source_language":"auto","target_lang":"zh","translate_provider":"openai","translate_model":"gpt","asr_model":"qwen"}"#
     )
     .unwrap();
-    writeln!(f, "{}", serde_json::to_string(&pending(0, "hello")).unwrap()).unwrap();
-    writeln!(f, "{}", serde_json::to_string(&completed_update(0, "你好")).unwrap()).unwrap();
+    writeln!(
+        f,
+        "{}",
+        serde_json::to_string(&pending(0, "hello")).unwrap()
+    )
+    .unwrap();
+    writeln!(
+        f,
+        "{}",
+        serde_json::to_string(&completed_update(0, "你好")).unwrap()
+    )
+    .unwrap();
     drop(f);
 
     let loaded = Checkpoint::load(&path).unwrap().unwrap();
@@ -128,7 +140,12 @@ fn test_save_compacts_updates() {
     )
     .unwrap();
     writeln!(f, "{}", serde_json::to_string(&pending(0, "a")).unwrap()).unwrap();
-    writeln!(f, "{}", serde_json::to_string(&completed_update(0, "A")).unwrap()).unwrap();
+    writeln!(
+        f,
+        "{}",
+        serde_json::to_string(&completed_update(0, "A")).unwrap()
+    )
+    .unwrap();
     drop(f);
 
     let cp = Checkpoint::load(&path).unwrap().unwrap();
@@ -175,8 +192,11 @@ fn test_task_id_stable_and_sensitive() -> std::io::Result<()> {
     // 仅 mtime 变化（大小不变）
     let f = std::fs::File::options().write(true).open(&p)?;
     f.set_times(
-        std::fs::FileTimes::new()
-            .set_modified(SystemTime::now().checked_add(Duration::from_secs(3600)).unwrap()),
+        std::fs::FileTimes::new().set_modified(
+            SystemTime::now()
+                .checked_add(Duration::from_secs(3600))
+                .unwrap(),
+        ),
     )?;
     drop(f);
     let id3 = compute_task_id(&p).unwrap();
