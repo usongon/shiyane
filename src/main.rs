@@ -4,6 +4,7 @@ use commands::{
     delete_task, export_subtitle, get_config, get_processing_progress, get_task_status,
     list_recent_tasks, pause_file_processing, save_config, start_file_processing,
     stop_file_processing, test_asr_connection, test_translate_connection, AppState,
+    RealtimeSessionInner,
 };
 use pick_up_sound_text::config::AppConfig;
 use std::sync::Arc;
@@ -31,6 +32,13 @@ fn main() {
         running_video_path: Arc::new(Mutex::new(None)),
         running_task_id: Arc::new(Mutex::new(None)),
         control: Arc::new(Mutex::new(())),
+        realtime: Arc::new(Mutex::new(RealtimeSessionInner {
+            pipeline: None,
+            session_task: None,
+            cancel_token: None,
+            session_id: None,
+            state: pick_up_sound_text::pipeline::realtime::RealtimeState::Idle,
+        })),
     };
 
     tauri::Builder::default()
@@ -49,6 +57,12 @@ fn main() {
             test_translate_connection,
             list_recent_tasks,
             get_task_status,
+            commands::realtime::start_realtime_session,
+            commands::realtime::pause_realtime_session,
+            commands::realtime::resume_realtime_session,
+            commands::realtime::stop_realtime_session,
+            commands::realtime::list_capture_targets,
+            commands::realtime::get_realtime_state,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1,3 +1,5 @@
+pub mod realtime;
+
 use pick_up_sound_text::asr::DashScopeFileTransProvider;
 use pick_up_sound_text::audio::FileAudioSource;
 use pick_up_sound_text::checkpoint::{compute_task_id, Checkpoint, CheckpointFingerprint};
@@ -64,6 +66,8 @@ pub struct AppState {
     pub running_task_id: Arc<Mutex<Option<String>>>,
     /// 串行化 start/pause/stop：交错调用也不会出现「旧任务句柄被新任务清除」等竞态
     pub control: Arc<Mutex<()>>,
+    /// 实时会话状态（单一 Mutex 包裹，避免多 Mutex 死锁）
+    pub realtime: Arc<Mutex<RealtimeSessionInner>>,
 }
 
 /// 所有任务 checkpoint 的根目录（$APP_DATA/tasks）
@@ -557,4 +561,13 @@ pub async fn list_recent_tasks(app: tauri::AppHandle) -> Result<Vec<RecentTask>,
     deduped.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
     deduped.truncate(8);
     Ok(deduped)
+}
+
+/// 实时会话状态（单一 Mutex 包裹，避免多 Mutex 死锁）
+pub struct RealtimeSessionInner {
+    pub pipeline: Option<pick_up_sound_text::pipeline::realtime::RealtimePipeline>,
+    pub session_task: Option<JoinHandle<()>>,
+    pub cancel_token: Option<CancellationToken>,
+    pub session_id: Option<String>,
+    pub state: pick_up_sound_text::pipeline::realtime::RealtimeState,
 }
