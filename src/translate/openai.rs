@@ -1,3 +1,4 @@
+use crate::error::transport_error;
 use crate::translate::{TranslateProvider, TranslateRequest, TranslateResponse};
 use crate::{Error, Result};
 use async_trait::async_trait;
@@ -7,10 +8,24 @@ use std::time::Duration;
 
 const MAX_ATTEMPTS: u32 = 3;
 const RETRY_BACKOFF_SECS: [u64; 2] = [2, 5];
+/// 网络死路快速失败：连不上 10s 内报错，不空耗整个请求超时
+const CONNECT_TIMEOUT_SECS: u64 = 10;
 
 fn build_client(timeout_secs: u64) -> Client {
     Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .build()
+        .expect("failed to build reqwest client")
+}
+
+/// 兜底直连客户端：系统代理对个别请求可出现「连接建立但永不转发」的假死，
+/// 最后一击绕开代理再试一次（国内直连 dashscope 可达）
+fn build_client_no_proxy(timeout_secs: u64) -> Client {
+    Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .no_proxy()
         .build()
         .expect("failed to build reqwest client")
 }
@@ -25,15 +40,13 @@ pub struct OpenAiCompatibleProvider {
 #[async_trait]
 impl TranslateProvider for OpenAiCompatibleProvider {
     async fn translate(&self, req: TranslateRequest) -> Result<TranslateResponse> {
-        let client = build_client(self.timeout_secs);
-        
         // Build context from previous sentences
         let context_text = if req.context.is_empty() {
             String::new()
         } else {
             format!("Previous context:\n{}\n\n", req.context.join("\n"))
         };
-        
+
         // Build messages with system prompt and few-shot examples
         let messages = vec![
             json!({
@@ -59,9 +72,9 @@ impl TranslateProvider for OpenAiCompatibleProvider {
             json!({
                 "role": "user",
                 "content": format!("{}Translate from {} to {}:\n\n{}", context_text, req.source_lang, req.target_lang, req.text)
-            })
+            }),
         ];
-        
+
         // Build request body (OpenAI Chat Completions format)
         let body = json!({
             "model": self.model,
@@ -69,12 +82,18 @@ impl TranslateProvider for OpenAiCompatibleProvider {
             "temperature": 0.3,
             "max_tokens": 500
         });
-        
+
         // Send request, retrying transient network errors (timeouts, dropped
         // connections). API-level errors are returned as-is without retry.
+        // 第 3 击走无代理直连：排除「代理对个别请求假死」这一层
         let url = format!("{}/chat/completions", self.base_url);
         let mut attempt = 1u32;
         let response = loop {
+            let client = if attempt == MAX_ATTEMPTS {
+                build_client_no_proxy(self.timeout_secs)
+            } else {
+                build_client(self.timeout_secs)
+            };
             match client
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", self.api_key))
@@ -87,45 +106,56 @@ impl TranslateProvider for OpenAiCompatibleProvider {
                 Err(e) if attempt < MAX_ATTEMPTS => {
                     tracing::warn!(
                         "Translate request failed (attempt {}/{}): {} — retrying in {}s",
-                        attempt, MAX_ATTEMPTS, e, RETRY_BACKOFF_SECS[(attempt - 1) as usize]
+                        attempt,
+                        MAX_ATTEMPTS,
+                        transport_error(&e),
+                        RETRY_BACKOFF_SECS[(attempt - 1) as usize]
                     );
-                    tokio::time::sleep(Duration::from_secs(RETRY_BACKOFF_SECS[(attempt - 1) as usize])).await;
+                    tokio::time::sleep(Duration::from_secs(
+                        RETRY_BACKOFF_SECS[(attempt - 1) as usize],
+                    ))
+                    .await;
                     attempt += 1;
                 }
                 Err(e) => {
                     return Err(Error::Translate(format!(
                         "HTTP request failed after {} attempts: {}",
-                        attempt, e
+                        attempt,
+                        transport_error(&e)
                     )));
                 }
             }
         };
-        
+
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(Error::Translate(format!("API error {}: {}", status, error_text)));
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(Error::Translate(format!(
+                "API error {}: {}",
+                status, error_text
+            )));
         }
-        
+
         // Parse response
         let json: serde_json::Value = response
             .json()
             .await
             .map_err(|e| Error::Translate(format!("Failed to parse response: {}", e)))?;
-        
+
         let translated_text = json["choices"][0]["message"]["content"]
             .as_str()
             .ok_or_else(|| Error::Translate("Invalid response format".to_string()))?
             .to_string();
-        
-        Ok(TranslateResponse {
-            translated_text,
-        })
+
+        Ok(TranslateResponse { translated_text })
     }
-    
+
     async fn test_connection(&self) -> Result<()> {
         let client = build_client(self.timeout_secs);
-        
+
         // Send minimal test request
         let body = json!({
             "model": self.model,
@@ -137,7 +167,7 @@ impl TranslateProvider for OpenAiCompatibleProvider {
             ],
             "max_tokens": 1
         });
-        
+
         let response = client
             .post(format!("{}/chat/completions", self.base_url))
             .header("Authorization", format!("Bearer {}", self.api_key))
@@ -145,12 +175,20 @@ impl TranslateProvider for OpenAiCompatibleProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| Error::Translate(format!("Connection test failed: {}", e)))?;
-        
+            .map_err(|e| {
+                Error::Translate(format!("Connection test failed: {}", transport_error(&e)))
+            })?;
+
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
-            return Err(Error::Translate(format!("API error {}: {}", status, error_text)));
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(Error::Translate(format!(
+                "API error {}: {}",
+                status, error_text
+            )));
         }
 
         Ok(())
@@ -160,8 +198,8 @@ impl TranslateProvider for OpenAiCompatibleProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     // Regression: a server that accepts connections but never responds must
     // produce an error within a bounded time (timeout + retries), not hang.

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+use crate::Result;
 use crate::asr::{AsrConfig, FileAsrProvider};
 use crate::audio::AudioSource;
 use crate::checkpoint::{Checkpoint, CheckpointFingerprint, SegmentProgress, SegmentStatus};
@@ -15,8 +16,11 @@ use crate::config::AppConfig;
 use crate::error::Error;
 use crate::subtitle::{SubtitleEntry, SubtitleStatus};
 use crate::translate::{TranslateProvider, TranslateRequest};
-use crate::Result;
 use std::path::PathBuf;
+
+/// 连续回退熔断阈值：达到即判定网络/翻译服务真不可用，中止任务。
+/// 单句卡死（服务端对个别输入 >60s 无响应）走回退继续，不受此限制
+const MAX_CONSECUTIVE_TRANSLATE_FALLBACKS: usize = 5;
 
 /// 管线阶段，供 UI 正确显示步骤（替代按百分比猜步骤的旧逻辑）
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -92,7 +96,7 @@ impl FilePipeline {
             cancel: CancellationToken::new(),
         }
     }
-    
+
     /// 初始化 checkpoint（目录可注入，供测试与 Tauri app_data_dir 使用）
     pub fn init_checkpoint_in(
         &mut self,
@@ -114,7 +118,7 @@ impl FilePipeline {
         self.current_fingerprint = Some(fingerprint);
         Ok(())
     }
-    
+
     /// Get real progress based on completed segments
     pub async fn get_progress(&self) -> f64 {
         *self.progress.lock().await
@@ -178,15 +182,16 @@ impl FilePipeline {
         // ---- 断点续传：指纹校验 ----
         // 当前指纹优先取 init 时注入的（生产中由当前 config 构建、二者恒等；
         // 测试通过注入不同指纹表达"配置变更"）。未 init 时退回从 config 推导。
-        let current_fp = self.current_fingerprint.clone().unwrap_or_else(|| {
-            CheckpointFingerprint {
-                source_language: self.source_language.clone(),
-                target_lang: self.config.translate.target_lang.clone(),
-                translate_provider: self.config.translate.provider.clone(),
-                translate_model: self.config.translate.model.clone(),
-                asr_model: self.config.asr.file_model.clone(),
-            }
-        });
+        let current_fp =
+            self.current_fingerprint
+                .clone()
+                .unwrap_or_else(|| CheckpointFingerprint {
+                    source_language: self.source_language.clone(),
+                    target_lang: self.config.translate.target_lang.clone(),
+                    translate_provider: self.config.translate.provider.clone(),
+                    translate_model: self.config.translate.model.clone(),
+                    asr_model: self.config.asr.file_model.clone(),
+                });
         if let (Some(cp), Some(cp_path)) = (&mut self.checkpoint, &self.checkpoint_path.clone()) {
             if !cp.segments.is_empty() && cp.fingerprint != current_fp {
                 let asr_invalid = cp.fingerprint.source_language != current_fp.source_language
@@ -205,6 +210,7 @@ impl FilePipeline {
                     for seg in cp.segments.iter_mut() {
                         seg.status = SegmentStatus::Pending;
                         seg.translated = None;
+                        seg.fallback = false;
                     }
                 }
                 if let Err(e) = cp.save(cp_path) {
@@ -290,7 +296,10 @@ impl FilePipeline {
             *phase = Phase::Transcribing;
             drop(phase);
 
-            tracing::info!("Starting file transcription with model: {}", asr_config.model);
+            tracing::info!(
+                "Starting file transcription with model: {}",
+                asr_config.model
+            );
             let transcribed = tokio::select! {
                 biased;
                 r = self.asr_provider.transcribe_file(&asr_config, &audio_path) => Some(r),
@@ -312,7 +321,10 @@ impl FilePipeline {
                 }
             };
 
-            tracing::info!("Transcription completed: {} sentences", transcription.sentences.len());
+            tracing::info!(
+                "Transcription completed: {} sentences",
+                transcription.sentences.len()
+            );
 
             // Clean up temp audio file
             if let Err(e) = std::fs::remove_file(&audio_path) {
@@ -332,10 +344,14 @@ impl FilePipeline {
                         status: SegmentStatus::Pending,
                         source: Some(s.text.clone()),
                         translated: None,
+                        fallback: false,
                     })
                     .collect();
                 if let Err(e) = cp.save(cp_path) {
-                    tracing::warn!("checkpoint 写盘失败（不影响本次任务，但断点续传不可用）: {}", e);
+                    tracing::warn!(
+                        "checkpoint 写盘失败（不影响本次任务，但断点续传不可用）: {}",
+                        e
+                    );
                 }
             }
 
@@ -391,6 +407,9 @@ impl FilePipeline {
             .collect();
 
         let mut entries: Vec<SubtitleEntry> = Vec::with_capacity(total_sentences);
+        // 单句翻译重试用尽 → 回退原文继续（服务端对个别 ASR 垃圾句可 >60s 无响应，
+        // 不值得拖死整个任务）；连续多句失败 = 网络/服务真不可用，熔断中止
+        let mut consecutive_fallbacks: usize = 0;
         for (idx, item) in items.iter().enumerate() {
             // 句间守卫：已取消则不再发起新的翻译请求（避免浪费一次调用）
             if self.cancel.is_cancelled() {
@@ -429,13 +448,17 @@ impl FilePipeline {
                 r = self.translate_provider.translate(translate_req) => Some(r),
                 _ = self.cancel.cancelled() => None,
             };
-            let translate_resp = match translated {
+            let (translated_text, translate_err) = match translated {
                 None => return self.park_as_paused().await,
-                Some(Ok(resp)) => resp,
+                Some(Ok(resp)) => (resp.translated_text, None),
                 Some(Err(e)) => {
-                    let mut state = self.state.lock().await;
-                    *state = PipelineState::Failed(e.to_string());
-                    return Err(e);
+                    tracing::warn!(
+                        "翻译第 {}/{} 句失败（{}），译文回退为原文继续",
+                        idx + 1,
+                        total_sentences,
+                        e
+                    );
+                    (item.source.clone(), Some(e))
                 }
             };
 
@@ -445,20 +468,36 @@ impl FilePipeline {
                 wall_start: (item.begin * 1000.0) as i64,
                 wall_end: (item.end * 1000.0) as i64,
                 source: item.source.clone(),
-                translated: translate_resp.translated_text,
+                translated: translated_text,
                 status: SubtitleStatus::Final,
             });
             previous_texts.push(item.source.clone());
 
-            // 逐句追加 Completed 更新行（O(1)，电影规模安全）
+            // 逐句追加 Completed 更新行（O(1)，电影规模安全）；回退句带 fallback 标记
             if let (Some(cp), Some(cp_path)) = (&mut self.checkpoint, &self.checkpoint_path) {
                 if let Some(seg) = cp.segments.get_mut(idx) {
                     seg.status = SegmentStatus::Completed;
                     seg.translated = Some(entries.last().unwrap().translated.clone());
+                    seg.fallback = translate_err.is_some();
                     if let Err(e) = Checkpoint::append_updates(cp_path, std::slice::from_ref(seg)) {
                         tracing::warn!("checkpoint 追加失败（继续运行）: {}", e);
                     }
                 }
+            }
+
+            if let Some(e) = translate_err {
+                consecutive_fallbacks += 1;
+                if consecutive_fallbacks >= MAX_CONSECUTIVE_TRANSLATE_FALLBACKS {
+                    let msg = format!(
+                        "连续 {} 句翻译失败（{}）：网络或翻译服务持续不可用，已中止任务",
+                        MAX_CONSECUTIVE_TRANSLATE_FALLBACKS, e
+                    );
+                    let mut state = self.state.lock().await;
+                    *state = PipelineState::Failed(msg.clone());
+                    return Err(Error::Translate(msg));
+                }
+            } else {
+                consecutive_fallbacks = 0;
             }
 
             // 进度：entries.len() 在续跑时从 completed_before 起步（预填句也算），
