@@ -622,10 +622,12 @@ body {
   overflow: hidden;
 }
 
-/* 实时口述行（未定稿）：比定稿行更暗，暗示还会变 */
+/* 实时口述行（未定稿）：比定稿行更暗，暗示还会变；不截断，让窗口跟随内容伸缩 */
 .overlay-partial {
   opacity: 0.55;
   margin-top: 4px;
   font-style: italic;
-  -webkit-line-clamp: 1;
+  display: block; /* 覆盖 overlay-source 的 -webkit-box 截断 */
+  -webkit-line-clamp: unset;
+  overflow: visible;
 }
