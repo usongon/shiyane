@@ -581,7 +581,13 @@ body {
   background: rgba(0, 0, 0, 0.6);
   backdrop-filter: blur(20px);
   border-radius: 12px;
-  overflow: hidden;
+  /* 内容少时自适应高度；超过最大高度后内部滚动，窗口不再变长 */
+  max-height: 276px; /* 窗口封顶 300px - 上下 padding */
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.overlay-container::-webkit-scrollbar {
+  display: none;
 }
 
 .overlay-line {

@@ -28,14 +28,16 @@ export default function OverlayPage() {
     return () => window.removeEventListener("storage", onStorage);
   }, []);
 
-  // 内容变化后自动调整窗口高度（封顶 500px）
+  // 内容变化后自动调整窗口高度（封顶 300px，超出后容器内部滚动）
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const height = Math.min(Math.max(el.offsetHeight, 60), 500);
+    const height = Math.min(Math.max(el.offsetHeight, 60), 300);
     getCurrentWindow()
       .setSize(new LogicalSize(600, height))
       .catch(() => {});
+    // 滚动到底部，最新内容始终可见
+    requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
   }, [lines, partial]);
 
   useEffect(() => {
