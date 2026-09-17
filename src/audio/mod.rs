@@ -1,3 +1,4 @@
+pub mod capture;
 pub mod file;
 
 pub use file::FileAudioSource;

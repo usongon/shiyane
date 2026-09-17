@@ -1,6 +1,6 @@
 use crate::config::OssConfig;
 use crate::{Error, Result};
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use hmac::{Hmac, Mac};
 use reqwest::Client;
 use sha1::Sha1;
@@ -52,19 +52,13 @@ impl OssUploader {
         );
 
         // Generate OSS signature for PUT request
-        let date = chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string();
-        let signature = self.generate_signature(
-            "PUT",
-            &content_md5,
-            content_type,
-            &date,
-            &object_key,
-        );
+        let date = chrono::Utc::now()
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
+        let signature =
+            self.generate_signature("PUT", &content_md5, content_type, &date, &object_key);
 
-        let auth_header = format!(
-            "OSS {}:{}",
-            self.config.access_key_id, signature
-        );
+        let auth_header = format!("OSS {}:{}", self.config.access_key_id, signature);
 
         // Upload file（瞬时网络故障重试：连接被断/代理抖动；PUT 幂等可安全重发）
         let mut attempt = 1u32;
@@ -84,15 +78,22 @@ impl OssUploader {
                 Err(e) if attempt < MAX_ATTEMPTS => {
                     tracing::warn!(
                         "OSS 上传失败（第 {}/{} 次）: {} — {}s 后重试",
-                        attempt, MAX_ATTEMPTS, e, RETRY_BACKOFF_SECS[(attempt - 1) as usize]
+                        attempt,
+                        MAX_ATTEMPTS,
+                        crate::error::transport_error(&e),
+                        RETRY_BACKOFF_SECS[(attempt - 1) as usize]
                     );
-                    tokio::time::sleep(Duration::from_secs(RETRY_BACKOFF_SECS[(attempt - 1) as usize])).await;
+                    tokio::time::sleep(Duration::from_secs(
+                        RETRY_BACKOFF_SECS[(attempt - 1) as usize],
+                    ))
+                    .await;
                     attempt += 1;
                 }
                 Err(e) => {
                     return Err(Error::Asr(format!(
                         "OSS upload failed after {} attempts: {}",
-                        attempt, e
+                        attempt,
+                        crate::error::transport_error(&e)
                     )));
                 }
             }
@@ -100,9 +101,17 @@ impl OssUploader {
 
         let status = response.status();
         let headers = response.headers().clone();
-        let response_body = response.text().await.unwrap_or_else(|_| "<failed to read body>".to_string());
-        
-        tracing::info!("OSS upload response: status={}, headers={:?}, body={}", status, headers, response_body);
+        let response_body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<failed to read body>".to_string());
+
+        tracing::info!(
+            "OSS upload response: status={}, headers={:?}, body={}",
+            status,
+            headers,
+            response_body
+        );
         tracing::info!("OSS upload URL: {}", url);
         tracing::info!("OSS Authorization header: {}", auth_header);
         tracing::info!("OSS Content-MD5: {}", content_md5);
@@ -124,7 +133,7 @@ impl OssUploader {
     /// expires_in: seconds until the URL expires (e.g., 3600 for 1 hour)
     fn generate_signed_url(&self, object_key: &str, expires_in: i64) -> Result<String> {
         let expires = chrono::Utc::now().timestamp() + expires_in;
-        
+
         let string_to_sign = format!(
             "GET\n\n\n{}\n/{}",
             expires,
@@ -187,13 +196,12 @@ impl OssUploader {
             self.config.bucket, self.config.endpoint, object_key
         );
 
-        let date = chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        let date = chrono::Utc::now()
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
         let signature = self.generate_signature("DELETE", "", "", &date, &object_key);
 
-        let auth_header = format!(
-            "OSS {}:{}",
-            self.config.access_key_id, signature
-        );
+        let auth_header = format!("OSS {}:{}", self.config.access_key_id, signature);
 
         let response = self
             .client
@@ -206,7 +214,10 @@ impl OssUploader {
 
         if !response.status().is_success() {
             let status = response.status();
-            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            let error_text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
             return Err(Error::Config(format!(
                 "OSS delete failed {}: {}",
                 status, error_text
@@ -237,14 +248,20 @@ mod tests {
         std::fs::write(tmp.path(), b"RIFF").unwrap();
 
         let start = std::time::Instant::now();
-        let err = uploader.upload_file(tmp.path(), "obj.wav").await.unwrap_err();
+        let err = uploader
+            .upload_file(tmp.path(), "obj.wav")
+            .await
+            .unwrap_err();
 
         let msg = err.to_string();
         assert!(
             msg.contains("after 3 attempts"),
             "应重试满 3 次后再报错，实际: {msg}"
         );
-        assert!(start.elapsed() >= Duration::from_secs(7), "2s+5s 退避必须发生");
+        assert!(
+            start.elapsed() >= Duration::from_secs(7),
+            "2s+5s 退避必须发生"
+        );
         assert!(start.elapsed() < Duration::from_secs(30));
     }
 }

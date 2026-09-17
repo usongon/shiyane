@@ -6,6 +6,7 @@ import { freshTheme } from "./theme";
 import type { AppConfig } from "./lib/types";
 import FilePage from "./views/FilePage";
 import RealtimePage from "./views/RealtimePage";
+import OverlayPage from "./views/OverlayPage";
 import SettingsDrawer from "./views/SettingsDrawer";
 import "./styles.css";
 
@@ -22,6 +23,13 @@ const VIEW_STATUS: Record<ViewKey, string> = {
 };
 
 export default function App() {
+  // 检查是否是 overlay 窗口
+  const isOverlay = useMemo(() => {
+    if (typeof window === "undefined") return false;
+    const params = new URLSearchParams(window.location.search);
+    return params.get("window") === "overlay";
+  }, []);
+
   const [view, setView] = useState<ViewKey>("file");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const backend = useMemo(() => getBackend(), []);
@@ -33,6 +41,15 @@ export default function App() {
       .then(setConfig)
       .catch(() => setConfig(null));
   }, [backend]);
+
+  // Overlay 窗口渲染精简版
+  if (isOverlay) {
+    return (
+      <BackendContext.Provider value={backend}>
+        <OverlayPage />
+      </BackendContext.Provider>
+    );
+  }
 
   const cfgItems = [
     { key: "ASR", ok: !!config && config.asr.api_key.length > 0 },

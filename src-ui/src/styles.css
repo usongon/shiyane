@@ -403,3 +403,231 @@ body {
   background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
   box-shadow: 0 8px 24px rgba(99, 102, 241, 0.35);
 }
+
+/* —— 实时字幕 —— */
+
+/* 整页可滚动兜底；居中用 margin auto 实现（justify-content: center
+   在内容溢出时会把顶部裁掉且滚不回去） */
+.realtime-setup {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding-bottom: 8px;
+}
+
+.realtime-setup > :first-child {
+  margin-top: auto;
+}
+
+.realtime-setup > :last-child {
+  margin-bottom: auto;
+}
+
+.realtime-form {
+  margin-top: 24px;
+  width: 100%;
+  max-width: 400px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.realtime-form-section {
+  text-align: left;
+}
+
+.realtime-form-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #374151;
+  margin-bottom: 8px;
+}
+
+/* 音源列表自身限高滚动（进程可达几十个），语言/按钮不被推出视口 */
+.realtime-targets {
+  max-height: 240px;
+  overflow-y: auto;
+  padding-right: 6px;
+}
+
+.realtime-target-row {
+  padding: 6px 0;
+}
+
+.realtime-session {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.realtime-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 0;
+  border-bottom: 1px solid #eef0f4;
+}
+
+.realtime-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.realtime-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #d7dae3;
+}
+
+.realtime-status-dot.listening {
+  background: #10b981;
+  animation: pulse 2s infinite;
+}
+
+.realtime-status-dot.connecting,
+.realtime-status-dot.reconnecting {
+  background: #6366f1;
+  animation: pulse 1.2s infinite;
+}
+
+.realtime-status-dot.paused {
+  background: #f59e0b;
+}
+
+.realtime-status-dot.stopped {
+  background: #9ca3af;
+}
+
+.realtime-status-dot.failed {
+  background: #ef4444;
+}
+
+.realtime-error {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(239, 68, 68, 0.08);
+  border-left: 3px solid #ef4444;
+  overflow-wrap: anywhere;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.realtime-status-text {
+  font-size: 13px;
+  color: #374151;
+}
+
+.realtime-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.realtime-subtitle-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.realtime-subtitle-line {
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.realtime-subtitle-line.partial {
+  background: rgba(99, 102, 241, 0.08);
+  border-left: 3px solid #6366f1;
+}
+
+.realtime-subtitle-timestamp {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-bottom: 4px;
+}
+
+.realtime-subtitle-source {
+  font-size: 14px;
+  color: #1f2937;
+  line-height: 1.5;
+}
+
+.realtime-subtitle-translated {
+  font-size: 12px;
+  color: #6b7280;
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+/* —— 悬浮字幕窗口 —— */
+
+.overlay-container {
+  display: flex;
+  flex-direction: column;
+  padding: 12px 16px;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(20px);
+  border-radius: 12px;
+  /* 内容少时自适应高度；超过最大高度后内部滚动，窗口不再变长 */
+  max-height: 276px; /* 窗口封顶 300px - 上下 padding */
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.overlay-container::-webkit-scrollbar {
+  display: none;
+}
+
+.overlay-line {
+  margin-bottom: 8px;
+}
+
+.overlay-line:last-child {
+  margin-bottom: 0;
+}
+
+.overlay-source {
+  font-size: 14px;
+  color: #ffffff;
+  line-height: 1.4;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  /* 长句硬截断：悬浮窗高度恒定，内容必须永远装得下（曾致底部译文被裁） */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+.overlay-translated {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.8);
+  margin-top: 2px;
+  line-height: 1.3;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+
+/* 实时口述行（未定稿）：比定稿行更暗，暗示还会变；不截断，让窗口跟随内容伸缩 */
+.overlay-partial {
+  opacity: 0.55;
+  margin-top: 4px;
+  font-style: italic;
+  display: block; /* 覆盖 overlay-source 的 -webkit-box 截断 */
+  -webkit-line-clamp: unset;
+  overflow: visible;
+}

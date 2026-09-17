@@ -1,6 +1,6 @@
 # Shiyane (拾言)
 
-A cross-platform desktop app that turns video files into translated subtitles. Drop a video, pick the language, export an SRT/VTT file with bilingual lines.
+Video-to-bilingual-subtitle tool + realtime subtitles. Drop a video to export SRT/VTT, or listen to system audio/microphone for live subtitles.
 
 [中文文档](README.md)
 
@@ -16,12 +16,14 @@ A cross-platform desktop app that turns video files into translated subtitles. D
 ## Features
 
 - **File-to-subtitle pipeline** — drag & drop or file picker, live progress with per-sentence granularity, clear success/failure states with error messages
+- **Realtime subtitles** — capture system audio (per-process selectable) or microphone, live source text + translation; pause/resume/stop
+- **Floating subtitle overlay** — always-on-top lyric-bar window for watching videos or meetings without switching apps; adjustable background opacity
 - **Resume & task control** — per-sentence progress is persisted; after a crash or restart, tasks resume from where they stopped (no re-upload or re-transcription). Pause anytime; stop resets the task
 - **Recent tasks** — the home screen lists recently processed videos with their status; resume unfinished tasks or delete them
 - **Real connectivity tests** — validate ASR / translate / OSS settings before saving
 - **BYOK** — API keys are encrypted locally (AES-256-GCM + Argon2), only ever sent to the respective API
 - **Private-by-default audio handling** — audio is uploaded to your own OSS bucket via signed URLs and deleted once transcription finishes
-- **Separate file/realtime ASR models** — `qwen-audio-3.0-asr-flash-filetrans` for file transcription, `qwen-audio-3.0-asr-flash` reserved for the realtime mode
+- **Separate file/realtime ASR models** — `qwen-audio-3.0-asr-flash-filetrans` for file transcription, `qwen-audio-3.0-asr-flash-streaming` for realtime recognition
 - **Cross-platform** — macOS, Windows, Linux (Tauri 2.0)
 
 ## Prerequisites
@@ -78,7 +80,7 @@ Open the **Settings** tab:
 | Field | Description |
 |-------|-------------|
 | **File transcription model** | Default `qwen-audio-3.0-asr-flash-filetrans` |
-| **Realtime model** | Default `qwen-audio-3.0-asr-flash` (for realtime mode) |
+| **Realtime model** | Default `qwen-audio-3.0-asr-flash-streaming` (for realtime subtitles) |
 | **ASR API Key** | Bailian API key |
 | **Workspace ID** | Bailian workspace ID (required for Beijing region; console top-right) |
 | **Translate Provider** | OpenAI / DashScope / DeepSeek / Kimi |
@@ -96,10 +98,10 @@ API keys are stored encrypted at `~/Library/Application Support/pick-up-sound-te
 ```
 src/               # Rust backend
 ├── asr/          # FileAsrProvider (async transcription) + DashScope realtime WebSocket client
-├── audio/        # AudioSource trait + FileAudioSource (ffmpeg extraction)
+├── audio/        # AudioSource trait + FileAudioSource (ffmpeg) + CaptureSource (ScreenCaptureKit / cpal)
 ├── oss/          # OSS uploader with HMAC-SHA1 signed URLs
 ├── translate/    # TranslateProvider trait + OpenAI-compatible HTTP client
-├── pipeline/     # FilePipeline: extract → transcribe → translate → entries
+├── pipeline/     # FilePipeline + RealtimePipeline (capture → ASR → translate, three concurrent tasks)
 ├── checkpoint/   # resume: append-only progress log
 ├── subtitle/     # SubtitleEntry, SRT/VTT generation
 ├── config/       # AppConfig + encrypted keystore
@@ -107,7 +109,7 @@ src/               # Rust backend
 
 src-ui/            # Frontend (React + TypeScript)
 ├── src/lib/      # Tauri backend bridge + browser mock demo layer
-├── src/views/    # File / Realtime / Settings views
+├── src/views/    # File / Realtime / Overlay / Settings views
 └── src/theme.ts  # AntD theme (light/dark, brand tokens)
 ```
 
@@ -115,9 +117,9 @@ src-ui/            # Frontend (React + TypeScript)
 
 - **Backend**: Rust 2024, Tauri 2.0, tokio, reqwest, tokio-tungstenite
 - **Frontend**: React 18 + TypeScript + Ant Design 5 + Vite (light/dark themes)
-- **ASR**: Bailian async file transcription API (submit → poll → download)
+- **ASR**: Bailian async file transcription API (submit → poll → download) + realtime WebSocket streaming
 - **Translation**: OpenAI-compatible Chat Completions API
-- **Audio**: ffmpeg (16kHz mono PCM WAV)
+- **Audio**: ffmpeg (file extraction), ScreenCaptureKit + cpal (realtime capture), rubato (resampling)
 
 ## License
 

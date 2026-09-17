@@ -7,10 +7,12 @@ import {
   Form,
   Input,
   Select,
+  Slider,
   theme as antdTheme,
 } from "antd";
 import { ApiOutlined } from "@ant-design/icons";
 import { BackendContext } from "../lib/backend";
+import { getOverlayOpacity, setOverlayOpacity } from "../lib/overlay-style";
 import { defaultConfig } from "../lib/types";
 import type { AppConfig } from "../lib/types";
 
@@ -314,6 +316,27 @@ export default function SettingsDrawer({
           API Key 仅保存在本机并加密存储
         </span>
       </Form>
+
+      <Divider orientation="left" plain style={{ fontSize: 12 }}>
+        悬浮字幕
+      </Divider>
+      <div style={{ padding: "0 4px" }}>
+        <div style={{ fontSize: 12.5, marginBottom: 4 }}>背景不透明度</div>
+        <Slider
+          min={0}
+          max={100}
+          step={5}
+          defaultValue={Math.round(getOverlayOpacity() * 100)}
+          onChange={(v) => setOverlayOpacity(v / 100)}
+          tooltip={{ formatter: (v) => `${v}%` }}
+        />
+        <span
+          className="mono"
+          style={{ fontSize: 10.5, color: token.colorTextTertiary, display: "block" }}
+        >
+          拖动即生效，悬浮窗打开时实时变化
+        </span>
+      </div>
 
       <div className="drawer-footer">
         <Button type="primary" block loading={saving} onClick={onSave}>

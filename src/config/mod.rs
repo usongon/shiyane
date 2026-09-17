@@ -60,7 +60,7 @@ impl Default for AppConfig {
                 api_key: "".to_string(),
                 workspace_id: None,
                 file_model: "qwen-audio-3.0-asr-flash-filetrans".to_string(),
-                realtime_model: "qwen-audio-3.0-asr-flash".to_string(),
+                realtime_model: "qwen-audio-3.0-asr-flash-streaming".to_string(),
             },
             translate: TranslateConfig {
                 provider: "openai".to_string(),
@@ -87,7 +87,12 @@ impl AppConfig {
         }
         let content = std::fs::read_to_string(&path)?;
         let mut config: AppConfig = serde_json::from_str(&content)?;
-        
+
+        // 存量配置硬迁移：2026-09 模型更名，老值会被服务端拒为 InvalidParameter
+        if config.asr.realtime_model == "qwen-audio-3.0-asr-flash" {
+            config.asr.realtime_model = "qwen-audio-3.0-asr-flash-streaming".to_string();
+        }
+
         // Decrypt API keys
         let keystore = keystore::KeyStore::new()?;
         if !config.asr.api_key.is_empty() {

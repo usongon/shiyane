@@ -598,7 +598,16 @@ export default function FilePage({ active }: { active: boolean }) {
                       "已暂停，本次转写未保留，继续将重新上传并转写"
                     )
                   ) : done ? (
-                    "转写完成，可导出字幕文件"
+                    fileStatus?.fallback_count ? (
+                      <Typography.Text
+                        type="warning"
+                        style={{ fontSize: 12.5 }}
+                      >
+                        转写完成；{fileStatus.fallback_count} 句翻译失败已保留原文
+                      </Typography.Text>
+                    ) : (
+                      "转写完成，可导出字幕文件"
+                    )
                   ) : null}
                 </div>
 

@@ -1,9 +1,11 @@
+pub mod realtime;
+
 use pick_up_sound_text::asr::DashScopeFileTransProvider;
 use pick_up_sound_text::audio::FileAudioSource;
-use pick_up_sound_text::checkpoint::{compute_task_id, Checkpoint, CheckpointFingerprint};
+use pick_up_sound_text::checkpoint::{Checkpoint, CheckpointFingerprint, compute_task_id};
 use pick_up_sound_text::config::{AppConfig, translate_provider_preset};
 use pick_up_sound_text::pipeline::{FilePipeline, PipelineState};
-use pick_up_sound_text::subtitle::{generate_srt, generate_vtt, SubtitleEntry};
+use pick_up_sound_text::subtitle::{SubtitleEntry, generate_srt, generate_vtt};
 use pick_up_sound_text::translate::{OpenAiCompatibleProvider, TranslateProvider};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -38,6 +40,9 @@ pub struct TaskStatus {
     /// 前端用它把语言下拉自动选回原值，避免「点了继续却因语言不同全量重跑」。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_language: Option<String>,
+    /// 翻译重试用尽、回退为原文的句数（完成态提示用；0 或未完成时不返回）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_count: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -48,6 +53,8 @@ pub struct RecentTask {
     pub modified_at: u64,
     pub state: TaskState,
     pub percent: f64,
+    /// 任务类型：file（文件转字幕）或 realtime（实时会话）
+    pub task_type: String,
 }
 
 pub struct AppState {
@@ -64,6 +71,8 @@ pub struct AppState {
     pub running_task_id: Arc<Mutex<Option<String>>>,
     /// 串行化 start/pause/stop：交错调用也不会出现「旧任务句柄被新任务清除」等竞态
     pub control: Arc<Mutex<()>>,
+    /// 实时会话状态（单一 Mutex 包裹，避免多 Mutex 死锁）
+    pub realtime: Arc<Mutex<RealtimeSessionInner>>,
 }
 
 /// 所有任务 checkpoint 的根目录（$APP_DATA/tasks）
@@ -116,7 +125,11 @@ pub async fn start_file_processing(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    tracing::info!("start_file_processing called: video_path={}, source_language={}", video_path, source_language);
+    tracing::info!(
+        "start_file_processing called: video_path={}, source_language={}",
+        video_path,
+        source_language
+    );
 
     let _control = state.control.lock().await;
     let video_path = PathBuf::from(video_path);
@@ -140,7 +153,8 @@ pub async fn start_file_processing(
         base_url: base_url.to_string(),
         model: config.translate.model.clone(),
         api_key: config.translate.api_key.clone(),
-        timeout_secs: 60,
+        // 实测正常单句可达 45s+（代理 + 长上下文），60s 会误杀慢而活的请求
+        timeout_secs: 90,
     };
 
     // Create pipeline
@@ -165,7 +179,12 @@ pub async fn start_file_processing(
         asr_model: config.asr.file_model.clone(),
     };
     pipeline
-        .init_checkpoint_in(app_data_dir, task_id.clone(), video_path.clone(), fingerprint)
+        .init_checkpoint_in(
+            app_data_dir,
+            task_id.clone(),
+            video_path.clone(),
+            fingerprint,
+        )
         .map_err(|e| e.to_string())?;
 
     // Get shared state handles
@@ -309,7 +328,7 @@ pub async fn stop_file_processing(
     let task_id = match compute_task_id(&path) {
         Ok(id) => id,
         Err(pick_up_sound_text::Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(())
+            return Ok(());
         }
         Err(e) => return Err(e.to_string()),
     };
@@ -361,7 +380,8 @@ pub async fn export_subtitle(
         _ => return Err(format!("Unsupported format: {}", format)),
     };
 
-    let file_path = app.dialog()
+    let file_path = app
+        .dialog()
         .file()
         .set_title(title)
         .set_file_name(format!("output.{}", ext))
@@ -384,30 +404,34 @@ pub async fn test_asr_connection(config: AppConfig) -> Result<String, String> {
     tracing::info!("ASR api_key length: {} chars", config.asr.api_key.len());
     tracing::info!("ASR workspace_id: {:?}", config.asr.workspace_id);
     tracing::info!("OSS config present: {}", config.oss.is_some());
-    
+
     // Validate required config
     if config.asr.api_key.is_empty() {
         return Err("ASR API Key 未配置".to_string());
     }
-    
+
     if config.asr.workspace_id.is_none() {
         return Err("ASR Workspace ID 未配置（北京区域必填）".to_string());
     }
-    
+
     if config.oss.is_none() {
         return Err("OSS 配置未设置（文件转写需要 OSS 托管音频）".to_string());
     }
-    
+
     let oss = config.oss.as_ref().unwrap();
-    if oss.endpoint.is_empty() || oss.bucket.is_empty() || oss.access_key_id.is_empty() || oss.access_key_secret.is_empty() {
+    if oss.endpoint.is_empty()
+        || oss.bucket.is_empty()
+        || oss.access_key_id.is_empty()
+        || oss.access_key_secret.is_empty()
+    {
         return Err("OSS 配置不完整".to_string());
     }
-    
+
     // Try to create provider and validate OSS connection
     let _provider = DashScopeFileTransProvider {
         oss_config: config.oss.clone(),
     };
-    
+
     // For now, just validate config presence
     // TODO: Could try uploading a small test file to OSS to verify credentials
     Ok("ASR 配置验证通过（API Key、Workspace ID、OSS 配置已设置）".to_string())
@@ -435,22 +459,67 @@ pub async fn get_task_status(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<TaskStatus, String> {
+    // 实时会话：video_path 是 "realtime://session_id"，task_id 就是 session_id
+    if video_path.starts_with("realtime://") {
+        let task_id = video_path.strip_prefix("realtime://").unwrap_or(&video_path);
+        let cp_path = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| e.to_string())?
+            .join("tasks")
+            .join(task_id)
+            .join("progress.jsonl");
+
+        let cp = match Checkpoint::load(&cp_path).map_err(|e| e.to_string())? {
+            None => return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0, source_language: None, fallback_count: None }),
+            Some(c) => c,
+        };
+
+        if cp.segments.is_empty() {
+            return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0, source_language: None, fallback_count: None });
+        } else if cp.is_all_completed() {
+            let fallback_count = cp.segments.iter().filter(|s| s.fallback).count();
+            return Ok(TaskStatus {
+                state: TaskState::Completed,
+                percent: 1.0,
+                source_language: Some(cp.fingerprint.source_language.clone()),
+                fallback_count: (fallback_count > 0).then_some(fallback_count),
+            });
+        } else {
+            return Ok(TaskStatus {
+                state: TaskState::Translating,
+                percent: cp.percent(),
+                source_language: Some(cp.fingerprint.source_language.clone()),
+                fallback_count: None,
+            });
+        }
+    }
+
+    // 文件任务：原有逻辑
     let path = PathBuf::from(video_path);
     let task_id = match compute_task_id(&path) {
         Ok(id) => id,
         // 文件不存在 = 无可续传任务，Fresh 语义更诚实（其余错误仍透传）
         Err(pick_up_sound_text::Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0, source_language: None })
+            return Ok(TaskStatus {
+                state: TaskState::Fresh,
+                percent: 0.0,
+                source_language: None,
+                fallback_count: None,
+            });
         }
         Err(e) => return Err(e.to_string()),
     };
-    let cp_path = tasks_root(&app)?
-        .join(&task_id)
-        .join("progress.jsonl");
+    let cp_path = tasks_root(&app)?.join(&task_id).join("progress.jsonl");
 
     let cp = match Checkpoint::load(&cp_path).map_err(|e| e.to_string())? {
         None => {
-            return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0, source_language: None })
+            return Ok(TaskStatus {
+                state: TaskState::Fresh,
+                percent: 0.0,
+                source_language: None,
+                fallback_count: None,
+            });
         }
         Some(c) => c,
     };
@@ -465,22 +534,35 @@ pub async fn get_task_status(
         || fp.translate_model != config.translate.model
         || fp.asr_model != config.asr.file_model
     {
-        return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0, source_language: None });
+        return Ok(TaskStatus {
+            state: TaskState::Fresh,
+            percent: 0.0,
+            source_language: None,
+            fallback_count: None,
+        });
     }
 
     if cp.segments.is_empty() {
-        Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0, source_language: None })
+        Ok(TaskStatus {
+            state: TaskState::Fresh,
+            percent: 0.0,
+            source_language: None,
+            fallback_count: None,
+        })
     } else if cp.is_all_completed() {
+        let fallback_count = cp.segments.iter().filter(|s| s.fallback).count();
         Ok(TaskStatus {
             state: TaskState::Completed,
             percent: 1.0,
             source_language: Some(cp.fingerprint.source_language.clone()),
+            fallback_count: (fallback_count > 0).then_some(fallback_count),
         })
     } else {
         Ok(TaskStatus {
             state: TaskState::Translating,
             percent: cp.percent(),
             source_language: Some(cp.fingerprint.source_language.clone()),
+            fallback_count: None,
         })
     }
 }
@@ -514,10 +596,16 @@ pub async fn list_recent_tasks(app: tauri::AppHandle) -> Result<Vec<RecentTask>,
             continue;
         }
         let video_path = cp.video_path.to_string_lossy().to_string();
-        let file_name = PathBuf::from(&video_path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
+        let (file_name, task_type) = if video_path.starts_with("realtime://") {
+            let display = video_path.strip_prefix("realtime://").unwrap_or(&video_path);
+            (format!("实时会话 {}", display), "realtime".to_string())
+        } else {
+            let name = PathBuf::from(&video_path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            (name, "file".to_string())
+        };
 
         let (state, percent) = if cp.segments.is_empty() {
             (TaskState::Fresh, 0.0)
@@ -534,6 +622,7 @@ pub async fn list_recent_tasks(app: tauri::AppHandle) -> Result<Vec<RecentTask>,
             modified_at,
             state,
             percent,
+            task_type,
         });
     }
 
@@ -557,4 +646,15 @@ pub async fn list_recent_tasks(app: tauri::AppHandle) -> Result<Vec<RecentTask>,
     deduped.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
     deduped.truncate(8);
     Ok(deduped)
+}
+
+/// 实时会话状态（单一 Mutex 包裹，避免多 Mutex 死锁）
+pub struct RealtimeSessionInner {
+    pub pipeline: Option<pick_up_sound_text::pipeline::realtime::RealtimePipeline>,
+    pub session_task: Option<JoinHandle<()>>,
+    pub cancel_token: Option<CancellationToken>,
+    pub session_id: Option<String>,
+    pub state: pick_up_sound_text::pipeline::realtime::RealtimeState,
+    /// 进入 failed 态的原因，供 get_realtime_state 轮询返回
+    pub last_error: Option<String>,
 }

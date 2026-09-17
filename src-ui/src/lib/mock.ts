@@ -1,4 +1,10 @@
-import type { AppConfig, ProgressInfo, RecentTask } from "./types";
+import type {
+  AppConfig,
+  ProgressInfo,
+  RecentTask,
+  CaptureTarget,
+  RealtimeStateInfo,
+} from "./types";
 import type { Backend, DragHandlers } from "./backend";
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -9,7 +15,7 @@ let config: AppConfig = {
     api_key: "sk-demo-xxxxxxxxxxxxxxxx",
     workspace_id: "llm-demoxxxxxxxx",
     file_model: "qwen-audio-3.0-asr-flash-filetrans",
-    realtime_model: "qwen-audio-3.0-asr-flash",
+    realtime_model: "qwen-audio-3.0-asr-flash-streaming",
   },
   translate: {
     provider: "openai",
@@ -117,6 +123,7 @@ export const mockBackend: Backend = {
         modified_at: now - 3600,
         state: "completed",
         percent: 1,
+        task_type: "file",
       },
       {
         task_id: "d4e5f6",
@@ -125,6 +132,7 @@ export const mockBackend: Backend = {
         modified_at: now - 86400,
         state: "translating",
         percent: 0.45,
+        task_type: "file",
       },
       {
         task_id: "g7h8i9",
@@ -133,6 +141,7 @@ export const mockBackend: Backend = {
         modified_at: now - 86400 * 3,
         state: "fresh",
         percent: 0,
+        task_type: "file",
       },
     ];
     return tasks.filter(
@@ -157,5 +166,46 @@ export const mockBackend: Backend = {
     return () => {
       delete (window as unknown as Record<string, unknown>).__mockDrag;
     };
+  },
+
+  async startRealtime(_sourceLanguage, _targetIds) {
+    await delay(400);
+    return "realtime-demo-session";
+  },
+  async pauseRealtime() {
+    await delay(200);
+  },
+  async resumeRealtime() {
+    await delay(200);
+  },
+  async stopRealtime() {
+    await delay(300);
+  },
+  async listCaptureTargets(): Promise<CaptureTarget[]> {
+    await delay(300);
+    return [
+      { id: "chrome", name: "Google Chrome", kind: "system_audio", icon_path: null },
+      { id: "spotify", name: "Spotify", kind: "system_audio", icon_path: null },
+      { id: "mic", name: "内置麦克风", kind: "microphone", icon_path: null },
+    ];
+  },
+  async getRealtimeState(): Promise<RealtimeStateInfo> {
+    return { state: "idle", session_id: null, entry_count: 0, error: null };
+  },
+  async toggleRealtimeOverlay(): Promise<boolean> {
+    return true;
+  },
+
+  async onSubtitlePartial(_cb) {
+    return () => {};
+  },
+  async onSubtitleFinal(_cb) {
+    return () => {};
+  },
+  async onTranslation(_cb) {
+    return () => {};
+  },
+  async onRealtimeStateChange(_cb) {
+    return () => {};
   },
 };

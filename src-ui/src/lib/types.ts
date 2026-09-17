@@ -53,6 +53,7 @@ export interface RecentTask {
   modified_at: number;
   state: RecentTaskState;
   percent: number;
+  task_type: "file" | "realtime";
 }
 
 export interface TaskStatus {
@@ -60,6 +61,8 @@ export interface TaskStatus {
   percent: number;
   /** checkpoint 记录的源语言，仅 translating/completed 返回 */
   source_language?: string;
+  /** 翻译重试用尽回退原文的句数，仅 completed 且 >0 时返回 */
+  fallback_count?: number;
 }
 
 export function basename(path: string): string {
@@ -74,7 +77,7 @@ export function defaultConfig(): AppConfig {
       api_key: "",
       workspace_id: null,
       file_model: "qwen-audio-3.0-asr-flash-filetrans",
-      realtime_model: "qwen-audio-3.0-asr-flash",
+      realtime_model: "qwen-audio-3.0-asr-flash-streaming",
     },
     translate: {
       provider: "openai",
@@ -84,4 +87,53 @@ export function defaultConfig(): AppConfig {
     },
     oss: null,
   };
+}
+
+// Realtime subtitle types
+export interface CaptureTarget {
+  id: string;
+  name: string;
+  kind: "system_audio" | "microphone";
+  icon_path: string | null;
+}
+
+export interface RealtimeStateInfo {
+  state: "idle" | "connecting" | "listening" | "paused" | "reconnecting" | "stopped" | "failed";
+  session_id: string | null;
+  entry_count: number;
+  error: string | null;
+}
+
+export interface SubtitleEntry {
+  content_start: number;
+  content_end: number;
+  wall_start: number;
+  wall_end: number;
+  source: string;
+  translated: string;
+  status: "partial" | "final" | "refined";
+}
+
+export interface SubtitlePartialEvent {
+  entry_index: number;
+  source: string;
+  ts_start: number;
+  ts_end: number;
+}
+
+export interface SubtitleFinalEvent {
+  entry_index: number;
+  entry: SubtitleEntry;
+}
+
+export interface TranslationEvent {
+  entry_index: number;
+  translated: string;
+}
+
+export interface RealtimeStateEvent {
+  state: RealtimeStateInfo["state"];
+  session_id: string | null;
+  /** 进入 failed 态时的错误详情 */
+  error?: string | null;
 }

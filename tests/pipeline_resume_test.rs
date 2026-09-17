@@ -103,6 +103,73 @@ impl TranslateProvider for MockTranslate {
     }
 }
 
+/// 命中 fail_texts 的句子永远失败（模拟服务端对特定输入 >60s 无响应后超时），
+/// 其余正常返回——用于钉住「单句卡死不拖死整个任务」的隔离语义
+struct StallTranslate {
+    fail_texts: Vec<String>,
+    call_texts: Arc<StdMutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl TranslateProvider for StallTranslate {
+    async fn translate(&self, req: TranslateRequest) -> Result<TranslateResponse> {
+        self.call_texts.lock().unwrap().push(req.text.clone());
+        if self.fail_texts.iter().any(|t| *t == req.text) {
+            return Err(Error::Translate("mock 单句卡死超时".to_string()));
+        }
+        Ok(TranslateResponse {
+            translated_text: format!("[T] {}", req.text),
+        })
+    }
+    async fn test_connection(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_stall_pipeline(
+    dir: &Path,
+    task_id: &str,
+    fingerprint: CheckpointFingerprint,
+    asr_sentences: Vec<TranscriptionSentence>,
+    fail_texts: Vec<String>,
+    tag: &str,
+) -> (
+    FilePipeline,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+    Arc<StdMutex<Vec<String>>>,
+) {
+    let extract_count = Arc::new(AtomicUsize::new(0));
+    let asr_count = Arc::new(AtomicUsize::new(0));
+    let call_texts = Arc::new(StdMutex::new(Vec::new()));
+    let mut pipeline = FilePipeline::new(
+        Box::new(MockAudioSource {
+            extract_count: extract_count.clone(),
+            tag: tag.to_string(),
+        }),
+        Box::new(MockFileAsr {
+            sentences: asr_sentences,
+            call_count: asr_count.clone(),
+        }),
+        Box::new(StallTranslate {
+            fail_texts,
+            call_texts: call_texts.clone(),
+        }),
+        AppConfig::default(),
+        fingerprint.source_language.clone(),
+    );
+    pipeline
+        .init_checkpoint_in(
+            dir.to_path_buf(),
+            task_id.to_string(),
+            PathBuf::from("/tmp/resume_test_video.mp4"),
+            fingerprint,
+        )
+        .unwrap();
+    (pipeline, extract_count, asr_count, call_texts)
+}
+
 fn build_pipeline(
     dir: &Path,
     task_id: &str,
@@ -110,7 +177,12 @@ fn build_pipeline(
     asr_sentences: Vec<TranscriptionSentence>,
     fail_on: Option<usize>,
     tag: &str,
-) -> (FilePipeline, Arc<AtomicUsize>, Arc<AtomicUsize>, Arc<StdMutex<Vec<String>>>) {
+) -> (
+    FilePipeline,
+    Arc<AtomicUsize>,
+    Arc<AtomicUsize>,
+    Arc<StdMutex<Vec<String>>>,
+) {
     let extract_count = Arc::new(AtomicUsize::new(0));
     let asr_count = Arc::new(AtomicUsize::new(0));
     let call_texts = Arc::new(StdMutex::new(Vec::new()));
@@ -154,7 +226,10 @@ async fn fresh_run_persists_completed_checkpoint() {
     );
 
     p.process().await.unwrap();
-    assert_eq!(p.get_state().await, pick_up_sound_text::pipeline::PipelineState::Completed);
+    assert_eq!(
+        p.get_state().await,
+        pick_up_sound_text::pipeline::PipelineState::Completed
+    );
     assert_eq!(p.get_phase().await, Phase::Done);
     assert_eq!(asr_count.load(Ordering::SeqCst), 1);
 
@@ -170,68 +245,247 @@ async fn fresh_run_persists_completed_checkpoint() {
 }
 
 #[tokio::test]
-async fn mid_run_failure_keeps_completed_sentences_on_disk() {
+async fn stalled_sentence_falls_back_to_source_and_completes() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut p, _extract, _asr, _calls) = build_pipeline(
+    let (mut p, _extract, _asr, _calls) = build_stall_pipeline(
         dir.path(),
-        "t-mid",
+        "t-fb1",
         fp("auto", "zh"),
-        sentences(5),
-        Some(2), // 第 3 次翻译调用失败
-        "mid",
+        sentences(4),
+        vec!["s1".to_string()],
+        "fb1",
     );
 
-    assert!(p.process().await.is_err());
+    p.process().await.unwrap();
+    assert_eq!(
+        p.get_state().await,
+        pick_up_sound_text::pipeline::PipelineState::Completed,
+        "单句卡死不得拖死整个任务"
+    );
 
-    let cp = Checkpoint::load(&dir.path().join("t-mid/progress.jsonl"))
+    let entries = p.get_entries().await;
+    assert_eq!(entries.len(), 4);
+    assert_eq!(entries[0].translated, "[T] s0");
+    assert_eq!(entries[1].translated, "s1", "卡死句回退为原文");
+    assert_eq!(entries[3].translated, "[T] s3");
+
+    let cp = Checkpoint::load(&dir.path().join("t-fb1/progress.jsonl"))
         .unwrap()
         .unwrap();
-    assert_eq!(cp.completed_count(), 2); // 前两句已落盘
-    assert_eq!(cp.segments[2].status, pick_up_sound_text::checkpoint::SegmentStatus::Pending);
+    assert!(cp.is_all_completed());
+    assert!(!cp.segments[0].fallback);
+    assert!(cp.segments[1].fallback, "卡死句要带 fallback 标记");
+    assert!(!cp.segments[2].fallback);
+}
+
+#[tokio::test]
+async fn five_consecutive_stalls_abort_with_honest_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let all_fail: Vec<String> = (0..7).map(|i| format!("s{i}")).collect();
+    let (mut p, _extract, _asr, calls) = build_stall_pipeline(
+        dir.path(),
+        "t-brk",
+        fp("auto", "zh"),
+        sentences(7),
+        all_fail,
+        "brk",
+    );
+
+    let err = p.process().await.unwrap_err();
+    assert!(
+        err.to_string().contains("连续 5 句"),
+        "熔断文案应含「连续 5 句」，实际: {err}"
+    );
+    match p.get_state().await {
+        pick_up_sound_text::pipeline::PipelineState::Failed(msg) => {
+            assert!(msg.contains("连续 5 句"), "Failed 文案: {msg}");
+        }
+        other => panic!("连续卡死应 Failed，实际: {other:?}"),
+    }
+
+    let cp = Checkpoint::load(&dir.path().join("t-brk/progress.jsonl"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(cp.completed_count(), 5, "熔断前 5 句已回退落盘");
+    assert_eq!(
+        cp.segments[5].status,
+        pick_up_sound_text::checkpoint::SegmentStatus::Pending
+    );
+    assert_eq!(calls.lock().unwrap().len(), 5, "熔断后不再发请求");
+}
+
+#[tokio::test]
+async fn non_consecutive_stalls_complete_with_fallbacks() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut p, _extract, _asr, _calls) = build_stall_pipeline(
+        dir.path(),
+        "t-fb2",
+        fp("auto", "zh"),
+        sentences(5),
+        vec!["s0".to_string(), "s1".to_string(), "s3".to_string()],
+        "fb2",
+    );
+
+    p.process().await.unwrap();
+    assert_eq!(
+        p.get_state().await,
+        pick_up_sound_text::pipeline::PipelineState::Completed,
+        "非连续卡死（最长连击 2）不得熔断"
+    );
+
+    let entries = p.get_entries().await;
+    assert_eq!(entries[0].translated, "s0");
+    assert_eq!(entries[2].translated, "[T] s2");
+    assert_eq!(entries[3].translated, "s3");
+
+    let cp = Checkpoint::load(&dir.path().join("t-fb2/progress.jsonl"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        cp.segments.iter().filter(|s| s.fallback).count(),
+        3,
+        "3 句 fallback 落盘"
+    );
+}
+
+#[tokio::test]
+async fn fallback_sentences_survive_resume_without_retranslate() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut p1, _e1, _asr1, _c1) = build_stall_pipeline(
+        dir.path(),
+        "t-fb3",
+        fp("auto", "zh"),
+        sentences(4),
+        vec!["s1".to_string()],
+        "f3a",
+    );
+    p1.process().await.unwrap();
+
+    let (mut p2, extract2, asr2, calls2) = build_stall_pipeline(
+        dir.path(),
+        "t-fb3",
+        fp("auto", "zh"),
+        sentences(4),
+        vec![],
+        "f3b",
+    );
+    p2.process().await.unwrap();
+
+    assert_eq!(asr2.load(Ordering::SeqCst), 0);
+    assert_eq!(extract2.load(Ordering::SeqCst), 0);
+    assert!(
+        calls2.lock().unwrap().is_empty(),
+        "fallback 句按已完成处理，续跑不得重翻（不重复付费）"
+    );
+    let entries = p2.get_entries().await;
+    assert_eq!(entries[1].translated, "s1", "fallback 结果原样恢复");
+}
+
+#[tokio::test]
+async fn config_change_retranslate_clears_fallback_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut p1, _e1, _asr1, _c1) = build_stall_pipeline(
+        dir.path(),
+        "t-fb4",
+        fp("auto", "zh"),
+        sentences(4),
+        vec!["s1".to_string()],
+        "f4a",
+    );
+    p1.process().await.unwrap();
+
+    let (mut p2, _e2, asr2, calls2) = build_stall_pipeline(
+        dir.path(),
+        "t-fb4",
+        fp("auto", "en"),
+        sentences(4),
+        vec![],
+        "f4b",
+    );
+    p2.process().await.unwrap();
+
+    assert_eq!(asr2.load(Ordering::SeqCst), 0, "改目标语言不得重跑 ASR");
+    assert_eq!(calls2.lock().unwrap().len(), 4, "全部句子重翻");
+
+    let cp = Checkpoint::load(&dir.path().join("t-fb4/progress.jsonl"))
+        .unwrap()
+        .unwrap();
+    assert!(
+        cp.segments.iter().all(|s| !s.fallback),
+        "重翻后旧的 fallback 标记必须清零"
+    );
 }
 
 #[tokio::test]
 async fn resume_skips_asr_and_translates_rest() {
     let dir = tempfile::tempdir().unwrap();
-    // 第一次：第 3 句翻译失败 → 盘上 2 句 Completed
-    let (mut p1, _e1, asr1, _c1) =
-        build_pipeline(dir.path(), "t-resume", fp("auto", "zh"), sentences(5), Some(2), "r1");
+    // 第一次：全部句子卡死 → 熔断中止，盘上前 5 句回退 Completed、后 2 句 Pending
+    let all_fail: Vec<String> = (0..7).map(|i| format!("s{i}")).collect();
+    let (mut p1, _e1, asr1, _c1) = build_stall_pipeline(
+        dir.path(),
+        "t-resume",
+        fp("auto", "zh"),
+        sentences(7),
+        all_fail,
+        "r1",
+    );
     assert!(p1.process().await.is_err());
     assert_eq!(asr1.load(Ordering::SeqCst), 1);
 
     // 第二次：同目录同指纹，全新 provider 实例（计数归零）
-    let (mut p2, extract2, asr2, calls2) =
-        build_pipeline(dir.path(), "t-resume", fp("auto", "zh"), sentences(5), None, "r2");
+    let (mut p2, extract2, asr2, calls2) = build_stall_pipeline(
+        dir.path(),
+        "t-resume",
+        fp("auto", "zh"),
+        sentences(7),
+        vec![],
+        "r2",
+    );
     p2.process().await.unwrap();
 
     assert_eq!(asr2.load(Ordering::SeqCst), 0, "续跑必须跳过 ASR");
     assert_eq!(extract2.load(Ordering::SeqCst), 0, "续跑必须跳过音频提取");
     let texts = calls2.lock().unwrap().clone();
-    assert_eq!(texts, vec!["s2", "s3", "s4"], "只翻剩余句子");
+    assert_eq!(texts, vec!["s5", "s6"], "只翻剩余句子（回退句不重翻）");
     assert_eq!((p2.get_progress().await * 100.0).round() as i64, 100);
 
     let entries = p2.get_entries().await;
-    assert_eq!(entries.len(), 5);
-    assert_eq!(entries[2].translated, "[T] s2");
-    assert_eq!(entries[4].translated, "[T] s4");
-    assert_eq!(entries[0].translated, "[T] s0", "重建的已完成句保留旧译文");
+    assert_eq!(entries.len(), 7);
+    assert_eq!(entries[5].translated, "[T] s5");
+    assert_eq!(entries[6].translated, "[T] s6");
+    assert_eq!(entries[0].translated, "s0", "重建的回退句保留原文");
 }
 
 #[tokio::test]
 async fn all_completed_restores_instantly_without_api_calls() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut p1, _e1, _asr1, _c1) =
-        build_pipeline(dir.path(), "t-done", fp("auto", "zh"), sentences(4), None, "d1");
+    let (mut p1, _e1, _asr1, _c1) = build_pipeline(
+        dir.path(),
+        "t-done",
+        fp("auto", "zh"),
+        sentences(4),
+        None,
+        "d1",
+    );
     p1.process().await.unwrap();
 
-    let (mut p2, extract2, asr2, calls2) =
-        build_pipeline(dir.path(), "t-done", fp("auto", "zh"), sentences(4), None, "d2");
+    let (mut p2, extract2, asr2, calls2) = build_pipeline(
+        dir.path(),
+        "t-done",
+        fp("auto", "zh"),
+        sentences(4),
+        None,
+        "d2",
+    );
     p2.process().await.unwrap();
 
     assert_eq!(asr2.load(Ordering::SeqCst), 0);
     assert_eq!(extract2.load(Ordering::SeqCst), 0);
     assert!(calls2.lock().unwrap().is_empty());
-    assert_eq!(p2.get_state().await, pick_up_sound_text::pipeline::PipelineState::Completed);
+    assert_eq!(
+        p2.get_state().await,
+        pick_up_sound_text::pipeline::PipelineState::Completed
+    );
     let entries = p2.get_entries().await;
     assert_eq!(entries.len(), 4);
     assert_eq!(entries[3].translated, "[T] s3");
@@ -240,12 +494,24 @@ async fn all_completed_restores_instantly_without_api_calls() {
 #[tokio::test]
 async fn target_lang_change_keeps_asr_retranslates_all() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut p1, _e1, _asr1, _c1) =
-        build_pipeline(dir.path(), "t-lang", fp("auto", "zh"), sentences(4), None, "l1");
+    let (mut p1, _e1, _asr1, _c1) = build_pipeline(
+        dir.path(),
+        "t-lang",
+        fp("auto", "zh"),
+        sentences(4),
+        None,
+        "l1",
+    );
     p1.process().await.unwrap();
 
-    let (mut p2, extract2, asr2, calls2) =
-        build_pipeline(dir.path(), "t-lang", fp("auto", "en"), sentences(4), None, "l2");
+    let (mut p2, extract2, asr2, calls2) = build_pipeline(
+        dir.path(),
+        "t-lang",
+        fp("auto", "en"),
+        sentences(4),
+        None,
+        "l2",
+    );
     p2.process().await.unwrap();
 
     assert_eq!(asr2.load(Ordering::SeqCst), 0, "改目标语言不得重跑 ASR");
@@ -262,12 +528,24 @@ async fn target_lang_change_keeps_asr_retranslates_all() {
 #[tokio::test]
 async fn source_language_change_reruns_asr() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut p1, _e1, _asr1, _c1) =
-        build_pipeline(dir.path(), "t-src", fp("auto", "zh"), sentences(4), None, "s1");
+    let (mut p1, _e1, _asr1, _c1) = build_pipeline(
+        dir.path(),
+        "t-src",
+        fp("auto", "zh"),
+        sentences(4),
+        None,
+        "s1",
+    );
     p1.process().await.unwrap();
 
-    let (mut p2, _extract2, asr2, calls2) =
-        build_pipeline(dir.path(), "t-src", fp("ja", "zh"), sentences(4), None, "s2");
+    let (mut p2, _extract2, asr2, calls2) = build_pipeline(
+        dir.path(),
+        "t-src",
+        fp("ja", "zh"),
+        sentences(4),
+        None,
+        "s2",
+    );
     p2.process().await.unwrap();
 
     assert_eq!(asr2.load(Ordering::SeqCst), 1, "改源语言必须重跑 ASR");
@@ -512,7 +790,10 @@ async fn pause_during_asr_returns_paused_without_persisting_sentences() {
     // 转写无句级断点：暂停时不得有任何句子进度（续跑=重新上传+转写）
     let persisted = Checkpoint::load(&dir.path().join("t-pause-asr/progress.jsonl")).unwrap();
     assert!(
-        persisted.as_ref().map(|c| c.segments.is_empty()).unwrap_or(true),
+        persisted
+            .as_ref()
+            .map(|c| c.segments.is_empty())
+            .unwrap_or(true),
         "转写中暂停不应落盘句子，实际: {persisted:?}"
     );
 }
@@ -600,11 +881,20 @@ async fn resume_after_pause_completes_without_asr_rerun() {
     );
 
     // 第二次：普通 provider 续跑，必须跳过提取/ASR，只翻剩余句子
-    let (mut p2, extract2, asr2, calls2) =
-        build_pipeline(dir.path(), "t-pause-rs", fp("auto", "zh"), sentences(5), None, "pz3b");
+    let (mut p2, extract2, asr2, calls2) = build_pipeline(
+        dir.path(),
+        "t-pause-rs",
+        fp("auto", "zh"),
+        sentences(5),
+        None,
+        "pz3b",
+    );
     p2.process().await.unwrap();
 
-    assert_eq!(p2.get_state().await, pick_up_sound_text::pipeline::PipelineState::Completed);
+    assert_eq!(
+        p2.get_state().await,
+        pick_up_sound_text::pipeline::PipelineState::Completed
+    );
     assert_eq!(asr2.load(Ordering::SeqCst), 0, "暂停后续跑必须跳过 ASR");
     assert_eq!(extract2.load(Ordering::SeqCst), 0);
     assert_eq!(
@@ -620,8 +910,14 @@ async fn resume_after_pause_completes_without_asr_rerun() {
 #[tokio::test]
 async fn pre_cancelled_token_pauses_before_any_work() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut p, extract, asr_count, calls) =
-        build_pipeline(dir.path(), "t-pre-cancel", fp("auto", "zh"), sentences(5), None, "pc1");
+    let (mut p, extract, asr_count, calls) = build_pipeline(
+        dir.path(),
+        "t-pre-cancel",
+        fp("auto", "zh"),
+        sentences(5),
+        None,
+        "pc1",
+    );
     p.cancel_handle().cancel(); // process 启动前已取消
 
     let outcome = tokio::time::timeout(Duration::from_secs(5), p.process()).await;
@@ -681,7 +977,10 @@ async fn cancel_with_ready_response_harvests_paid_work() {
         .unwrap()
         .unwrap();
     assert_eq!(cp.completed_count(), 3, "已就绪的付费结果必须收割");
-    assert_eq!(cp.segments[3].status, pick_up_sound_text::checkpoint::SegmentStatus::Pending);
+    assert_eq!(
+        cp.segments[3].status,
+        pick_up_sound_text::checkpoint::SegmentStatus::Pending
+    );
 }
 
 #[tokio::test]
@@ -703,9 +1002,16 @@ async fn resume_seeds_translation_context_from_checkpoint() {
     }
 
     let dir = tempfile::tempdir().unwrap();
-    // 第一次：第 3 句翻译失败 → 盘上 s0、s1 已完成
-    let (mut p1, _e1, _asr1, _c1) =
-        build_pipeline(dir.path(), "t-ctx", fp("auto", "zh"), sentences(5), Some(2), "x1");
+    // 第一次：全部句子卡死 → 熔断中止，盘上前 5 句回退 Completed（含 s0、s1）
+    let all_fail: Vec<String> = (0..7).map(|i| format!("s{i}")).collect();
+    let (mut p1, _e1, _asr1, _c1) = build_stall_pipeline(
+        dir.path(),
+        "t-ctx",
+        fp("auto", "zh"),
+        sentences(7),
+        all_fail,
+        "x1",
+    );
     assert!(p1.process().await.is_err());
 
     let contexts: Arc<StdMutex<Vec<Vec<String>>>> = Arc::new(StdMutex::new(Vec::new()));
