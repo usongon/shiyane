@@ -53,6 +53,8 @@ pub struct RealtimePipeline {
     translate_provider: Option<Arc<dyn TranslateProvider>>,
     checkpoint_path: Option<PathBuf>,
     checkpoint: Option<Checkpoint>,
+    /// start() 时注入，resume 重连时复用（发事件用）
+    app_handle: Option<tauri::AppHandle>,
 }
 
 impl RealtimePipeline {
@@ -80,6 +82,7 @@ impl RealtimePipeline {
             translate_provider: Some(translate_provider),
             checkpoint_path: None,
             checkpoint: None,
+            app_handle: None,
         }
     }
 
@@ -100,6 +103,7 @@ impl RealtimePipeline {
             translate_provider: None,
             checkpoint_path: None,
             checkpoint: None,
+            app_handle: None,
         }
     }
 
@@ -153,7 +157,10 @@ impl RealtimePipeline {
         Ok(())
     }
 
-    /// 启动三并发 task（capture → ASR → translate）
+    /// 启动三并发 task（capture → ASR → translate）。
+    /// 立即返回：运行期由 spawn_session_tasks 内的监护 task 照看——
+    /// 若在此等待子 task 结束，调用方将整场会话持有 RealtimeSessionInner 锁，
+    /// 暂停/停止命令全部死锁（曾致按钮点击无响应）。
     pub async fn start(&mut self, app_handle: tauri::AppHandle) -> Result<()> {
         let mut state = self.state.lock().await;
         if *state != RealtimeState::Idle && *state != RealtimeState::Stopped {
@@ -161,6 +168,8 @@ impl RealtimePipeline {
         }
         *state = RealtimeState::Connecting;
         drop(state);
+
+        self.app_handle = Some(app_handle.clone());
 
         // 启动 ASR 连接
         let asr_config = AsrConfig {
@@ -180,18 +189,28 @@ impl RealtimePipeline {
             .ok_or_else(|| Error::AudioSource("Capture source not initialized".to_string()))?;
         let audio_rx = capture_source.start(&self.capture_target_ids.clone()).await?;
 
-        // 更新状态
+        self.spawn_session_tasks(asr_stream, audio_rx, app_handle).await;
+
+        Ok(())
+    }
+
+    /// 组装三并发 task + 监护 task，置 Listening 并发事件。
+    /// start（全新会话）与 resume（暂停后重连，保留时间轴偏移与条目序号）共用。
+    async fn spawn_session_tasks(
+        &self,
+        asr_stream: Box<dyn AsrStream>,
+        audio_rx: mpsc::Receiver<AudioChunk>,
+        app_handle: tauri::AppHandle,
+    ) {
         let mut state = self.state.lock().await;
         *state = RealtimeState::Listening;
         drop(state);
 
-        // 发射状态变更事件
         let _ = app_handle.emit("realtime:state-change", RealtimeStateEvent::new(
             RealtimeState::Listening,
             Some(self.session_id.clone()),
         ));
 
-        // 启动三并发 task
         let (asr_audio_tx, asr_audio_rx) = mpsc::channel::<Vec<i16>>(100);
         let (translate_tx, translate_rx) = mpsc::channel::<TranslateJob>(100);
 
@@ -199,23 +218,36 @@ impl RealtimePipeline {
         let asr_task = self.spawn_asr_task(asr_stream, asr_audio_rx, translate_tx, app_handle.clone());
         let translate_task = self.spawn_translate_task(translate_rx, app_handle.clone());
 
-        // 等待所有 task 完成（或被取消）
-        tokio::select! {
-            _ = self.cancel.cancelled() => {
-                tracing::info!("Realtime pipeline cancelled");
+        // 监护 task：任一子 task 自行结束（如 ASR 断流）而未被主动 cancel，
+        // 说明会话已死——标记 Failed 并通知前端
+        let state = self.state.clone();
+        let cancel = self.cancel.clone();
+        let session_id = self.session_id.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    tracing::info!("Realtime pipeline cancelled");
+                }
+                _ = capture_task => {
+                    tracing::info!("Capture task ended");
+                }
+                _ = asr_task => {
+                    tracing::info!("ASR task ended");
+                }
+                _ = translate_task => {
+                    tracing::info!("Translate task ended");
+                }
             }
-            _ = capture_task => {
-                tracing::info!("Capture task ended");
+            if !cancel.is_cancelled() {
+                let mut s = state.lock().await;
+                if *s == RealtimeState::Listening {
+                    *s = RealtimeState::Failed;
+                    drop(s);
+                    let _ = app_handle.emit("realtime:state-change",
+                        RealtimeStateEvent::failed("识别流意外结束".to_string(), Some(session_id)));
+                }
             }
-            _ = asr_task => {
-                tracing::info!("ASR task ended");
-            }
-            _ = translate_task => {
-                tracing::info!("Translate task ended");
-            }
-        }
-
-        Ok(())
+        });
     }
 
     /// 暂停：停止采集 + 关闭 ASR 连接
@@ -238,10 +270,17 @@ impl RealtimePipeline {
         }
         drop(entries);
 
+        if let Some(app_handle) = &self.app_handle {
+            let _ = app_handle.emit("realtime:state-change", RealtimeStateEvent::new(
+                RealtimeState::Paused,
+                Some(self.session_id.clone()),
+            ));
+        }
+
         Ok(())
     }
 
-    /// 恢复：新建 ASR 连接，继续采集
+    /// 恢复：新建 ASR 连接 + 重启采集，时间轴偏移与条目序号延续上一段
     pub async fn resume(&mut self) -> Result<()> {
         let mut state = self.state.lock().await;
         if *state != RealtimeState::Paused {
@@ -250,10 +289,12 @@ impl RealtimePipeline {
         *state = RealtimeState::Reconnecting;
         drop(state);
 
-        // 重置 cancel token（新建 ASR 连接）
+        let app_handle = self.app_handle.clone()
+            .ok_or_else(|| Error::AudioSource("Session not started".to_string()))?;
+
+        // 重置 cancel token（旧任务已全部退出）
         self.cancel = CancellationToken::new();
 
-        // 重建 ASR 连接
         let asr_config = AsrConfig {
             provider: self.config.asr.provider.clone(),
             model: self.config.asr.realtime_model.clone(),
@@ -264,19 +305,18 @@ impl RealtimePipeline {
 
         let asr_provider = self.asr_provider.as_ref()
             .ok_or_else(|| Error::Asr("ASR provider not initialized".to_string()))?;
-        let _asr_stream = asr_provider.start_stream(&asr_config).await?;
+        let asr_stream = asr_provider.start_stream(&asr_config).await?;
 
-        // TODO: 恢复采集（需要重新启动 capture source）
-        // 当前简化：状态直接回 Listening，实际音频采集需要 capture_source 支持 restart
+        let capture_source = self.capture_source.as_mut()
+            .ok_or_else(|| Error::AudioSource("Capture source not initialized".to_string()))?;
+        let audio_rx = capture_source.start(&self.capture_target_ids.clone()).await?;
 
-        let mut state = self.state.lock().await;
-        *state = RealtimeState::Listening;
-        drop(state);
+        self.spawn_session_tasks(asr_stream, audio_rx, app_handle).await;
 
         Ok(())
     }
 
-    /// 停止：采集停止 → ASR finish → 翻译 drain → checkpoint save
+    /// 停止：采集停止 → ASR finish → 子 task 退出（事件行已实时落盘）
     pub async fn stop(&mut self) -> Result<()> {
         let mut state = self.state.lock().await;
         if *state == RealtimeState::Stopped {
@@ -288,11 +328,15 @@ impl RealtimePipeline {
         // 触发取消
         self.cancel.cancel();
 
-        // 保存 checkpoint
-        if let (Some(cp), Some(cp_path)) = (&self.checkpoint, &self.checkpoint_path) {
-            if let Err(e) = cp.save(cp_path) {
-                tracing::warn!("checkpoint 终态保存失败: {}", e);
-            }
+        // checkpoint 无需终态 save：segment 事件行已实时 append_updates 落盘；
+        // 内存 checkpoint 对象从不更新，此处 save 会用空 segments 重写文件、
+        // 抹掉全部已追加的事件行
+
+        if let Some(app_handle) = &self.app_handle {
+            let _ = app_handle.emit("realtime:state-change", RealtimeStateEvent::new(
+                RealtimeState::Stopped,
+                Some(self.session_id.clone()),
+            ));
         }
 
         Ok(())
@@ -346,7 +390,8 @@ impl RealtimePipeline {
         let checkpoint_path = self.checkpoint_path.clone();
 
         tokio::spawn(async move {
-            let mut entry_index = 0usize;
+            // 从已有条目数起算：暂停恢复后新 asr task 不能从 0 重数（会覆盖旧条目）
+            let mut entry_index = finalized_entries.lock().await.len();
             let mut last_partial_emit = std::time::Instant::now();
 
             loop {
