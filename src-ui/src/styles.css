@@ -406,14 +406,25 @@ body {
 
 /* —— 实时字幕 —— */
 
+/* 整页可滚动兜底；居中用 margin auto 实现（justify-content: center
+   在内容溢出时会把顶部裁掉且滚不回去） */
 .realtime-setup {
   flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 4px;
   text-align: center;
+  padding-bottom: 8px;
+}
+
+.realtime-setup > :first-child {
+  margin-top: auto;
+}
+
+.realtime-setup > :last-child {
+  margin-bottom: auto;
 }
 
 .realtime-form {
@@ -434,6 +445,13 @@ body {
   font-weight: 600;
   color: #374151;
   margin-bottom: 8px;
+}
+
+/* 音源列表自身限高滚动（进程可达几十个），语言/按钮不被推出视口 */
+.realtime-targets {
+  max-height: 240px;
+  overflow-y: auto;
+  padding-right: 6px;
 }
 
 .realtime-target-row {

@@ -187,21 +187,23 @@ export default function RealtimePage({ active }: { active: boolean }) {
           <div className="realtime-form">
             <div className="realtime-form-section">
               <div className="realtime-form-label">音源选择</div>
-              <Checkbox.Group
-                value={selectedTargets}
-                onChange={(vals) => setSelectedTargets(vals as string[])}
-              >
-                {targets.map((t) => (
-                  <div key={t.id} className="realtime-target-row">
-                    <Checkbox value={t.id}>
-                      {t.name}
-                      <span className="realtime-target-kind">
-                        {t.kind === "system_audio" ? "系统音频" : "麦克风"}
-                      </span>
-                    </Checkbox>
-                  </div>
-                ))}
-              </Checkbox.Group>
+              <div className="realtime-targets">
+                <Checkbox.Group
+                  value={selectedTargets}
+                  onChange={(vals) => setSelectedTargets(vals as string[])}
+                >
+                  {targets.map((t) => (
+                    <div key={t.id} className="realtime-target-row">
+                      <Checkbox value={t.id}>
+                        {t.name}
+                        <span className="realtime-target-kind">
+                          {t.kind === "system_audio" ? "系统音频" : "麦克风"}
+                        </span>
+                      </Checkbox>
+                    </div>
+                  ))}
+                </Checkbox.Group>
+              </div>
             </div>
 
             <div className="realtime-form-section">
