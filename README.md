@@ -1,6 +1,6 @@
 # 拾言 (Shiyane)
 
-视频转双语字幕工具：拖入视频文件，自动提取音频、语音识别、翻译，导出带原文和译文的 SRT/VTT 字幕。
+视频转双语字幕 + 实时字幕工具。拖入视频文件导出 SRT/VTT，或监听系统音频/麦克风实时出字幕。
 
 [English](README.en.md)
 
@@ -16,12 +16,14 @@
 ## 特性
 
 - **文件转字幕流水线** — 拖拽或点击选择，逐句实时进度，成功/失败状态与错误信息明确展示
+- **实时字幕** — 监听系统音频（可按进程选择）或麦克风，边说边出原文与译文；支持暂停/恢复/停止
+- **悬浮字幕窗** — 置顶歌词条式悬浮窗，看片/开会时无需切换窗口；背景不透明度可调
 - **断点续传与任务控制** — 进度逐句保存，应用崩溃或重启后从断点继续（不重复上传与转写）；支持随时暂停，停止则清零重跑
 - **最近任务** — 主页记录最近处理的视频与各自状态，可继续未完成的任务或删除记录
 - **真实连通性测试** — 保存前即可验证 ASR / 翻译 / OSS 配置是否可用
 - **BYOK（自带密钥）** — API Key 本地加密存储（AES-256-GCM + Argon2），只发送到对应 API
 - **音频隐私优先** — 音频通过签名 URL 上传到你自己的 OSS Bucket，转写完成后自动删除
-- **文件/实时 ASR 模型分开配置** — 文件转写用 `qwen-audio-3.0-asr-flash-filetrans`，实时模式预留 `qwen-audio-3.0-asr-flash`
+- **文件/实时 ASR 模型分开配置** — 文件转写用 `qwen-audio-3.0-asr-flash-filetrans`，实时识别用 `qwen-audio-3.0-asr-flash-streaming`
 - **跨平台** — macOS、Windows、Linux（基于 Tauri 2.0）
 
 ## 前置要求
@@ -84,7 +86,7 @@ cd src-ui && npm install && npm run dev
 | 字段 | 说明 |
 |------|------|
 | **文件转写模型** | 默认 `qwen-audio-3.0-asr-flash-filetrans` |
-| **实时识别模型** | 默认 `qwen-audio-3.0-asr-flash`（供实时模式使用） |
+| **实时识别模型** | 默认 `qwen-audio-3.0-asr-flash-streaming`（供实时字幕使用） |
 | **ASR API Key** | 百炼 API Key |
 | **业务空间 ID** | 百炼 Workspace ID（北京区域必填，控制台右上角获取） |
 | **翻译渠道** | OpenAI / 百炼 / DeepSeek / Kimi |
@@ -102,10 +104,10 @@ API Key 加密存储在 `~/Library/Application Support/pick-up-sound-text/config
 ```
 src/               # Rust 后端
 ├── asr/          # 文件转写抽象（异步任务）+ 百炼实时 WebSocket 客户端
-├── audio/        # 音频源抽象 + 文件音频源（ffmpeg 提取）
+├── audio/        # 音频源抽象 + 文件音频源（ffmpeg）+ 采集抽象（ScreenCaptureKit / cpal）
 ├── oss/          # OSS 上传 + HMAC-SHA1 签名 URL
 ├── translate/    # 翻译抽象 + OpenAI 兼容 HTTP 客户端
-├── pipeline/     # 流水线：提取 → 转写 → 翻译 → 字幕条目
+├── pipeline/     # 文件流水线 + 实时管线（采集 → ASR → 翻译，三并发 task）
 ├── checkpoint/   # 断点续传：追加式进度日志
 ├── subtitle/     # 字幕条目、SRT/VTT 生成
 ├── config/       # 配置管理 + 加密密钥存储
@@ -113,7 +115,7 @@ src/               # Rust 后端
 
 src-ui/            # 前端（React + TypeScript）
 ├── src/lib/      # Tauri 后端桥接层 + 浏览器 mock 演示层
-├── src/views/    # 文件转字幕 / 实时字幕 / 设置
+├── src/views/    # 文件转字幕 / 实时字幕 / 悬浮字幕窗 / 设置
 └── src/theme.ts  # AntD 主题（浅/暗双主题，品牌色 token）
 ```
 
@@ -121,9 +123,9 @@ src-ui/            # 前端（React + TypeScript）
 
 - **后端**：Rust 2024、Tauri 2.0、tokio、reqwest、tokio-tungstenite
 - **前端**：React 18 + TypeScript + Ant Design 5 + Vite（浅/暗双主题）
-- **ASR**：百炼异步文件转写 API（提交 → 轮询 → 下载）
+- **ASR**：百炼异步文件转写 API（提交 → 轮询 → 下载）+ 实时 WebSocket 流式识别
 - **翻译**：OpenAI 兼容 Chat Completions API
-- **音频**：ffmpeg（16kHz 单声道 PCM WAV）
+- **音频**：ffmpeg（文件提取）、ScreenCaptureKit + cpal（实时采集）、rubato（重采样）
 
 ## 许可证
 
