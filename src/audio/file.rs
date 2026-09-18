@@ -31,24 +31,41 @@ fn resolve_tool_in(bundled_dir: &Path, name: &str, extra_dirs: &[PathBuf]) -> Pa
     PathBuf::from(name)
 }
 
+/// Windows 下可执行文件名必须带 .exe（Tauri sidecar 安装后剥三元组落盘 ffmpeg.exe）
+fn tool_exe_name(name: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        format!("{name}.exe")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        name.to_string()
+    }
+}
+
 fn resolve_tool(name: &str) -> PathBuf {
-    let extra_dirs = ["/opt/homebrew/bin", "/usr/local/bin"]
-        .iter()
-        .map(PathBuf::from)
-        .collect::<Vec<_>>();
+    #[cfg(target_os = "macos")]
+    let extra_dirs: Vec<PathBuf> = vec![
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ];
+    #[cfg(not(target_os = "macos"))]
+    let extra_dirs: Vec<PathBuf> = Vec::new(); // Windows：sidecar → PATH 两级即可
     let bundled_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| PathBuf::from("/nonexistent"));
-    resolve_tool_in(&bundled_dir, name, &extra_dirs)
+    resolve_tool_in(&bundled_dir, &tool_exe_name(name), &extra_dirs)
 }
 
 /// 子进程启动失败的友好映射：NotFound 给出安装指引，其余透传原因
 fn tool_spawn_error(tool: &str, e: std::io::Error) -> Error {
     if e.kind() == std::io::ErrorKind::NotFound {
-        Error::AudioSource(format!(
-            "未检测到 {tool}。请安装后重试：brew install ffmpeg"
-        ))
+        #[cfg(target_os = "macos")]
+        let hint = "未检测到 {tool}。请安装后重试：brew install ffmpeg".to_string();
+        #[cfg(not(target_os = "macos"))]
+        let hint = "未检测到 {tool}。应用自带的 ffmpeg 丢失，请重装本应用；或在系统 PATH 中安装 ffmpeg".to_string();
+        Error::AudioSource(hint.replace("{tool}", tool))
     } else {
         Error::AudioSource(format!("{tool} 执行失败: {e}"))
     }
@@ -295,5 +312,16 @@ mod tests {
             resolve_tool_in(empty.path(), "ffmpeg", &[empty.path().to_path_buf()]),
             PathBuf::from("ffmpeg")
         );
+    }
+
+    #[test]
+    fn bundled_tool_name_has_exe_suffix_on_windows() {
+        // 跨平台断言：windows 期望带 .exe，mac 期望裸名
+        let expected = if cfg!(target_os = "windows") {
+            "ffmpeg.exe"
+        } else {
+            "ffmpeg"
+        };
+        assert_eq!(tool_exe_name("ffmpeg"), expected);
     }
 }
