@@ -1,63 +1,16 @@
+use super::ComGuard;
 use crate::{Error, Result};
 use windows::core::{Interface, HSTRING, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, RPC_E_CHANGED_MODE};
+use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::Media::Audio::{
     eConsole, eRender, IAudioSessionControl, IAudioSessionControl2, IAudioSessionEnumerator,
     IAudioSessionManager2, IMMDeviceEnumerator, MMDeviceEnumerator,
 };
-use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED,
-};
+use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
-
-/// 每线程一次的 COM 初始化守卫：获取时调 CoInitializeEx(MTA)，Drop 调 CoUninitialize。
-/// 两个获取变体：
-/// - [`ComGuard::new`]（宽容）：线程已按其他并发模型初始化（RPC_E_CHANGED_MODE）时
-///   沿用现状，不接管也不配对反初始化——适用于线程内自用、不向其他线程传递 COM
-///   接口的场景（如采集线程，新线程首次初始化必然 MTA 成功）。
-/// - [`ComGuard::acquire_mta`]（严格）：遇 RPC_E_CHANGED_MODE 返回 Err——音频捕获的
-///   调用线程侧序列（端点解析 → Activate → Initialize → Start）必须运行在 MTA，
-///   否则裸接口移交 MTA 采集线程不安全（MtaInterface 的 SAFETY 前提）。
-/// （Task 6 上移至 windows/mod.rs 共享）
-pub(crate) struct ComGuard {
-    uninitialize: bool,
-}
-
-impl ComGuard {
-    pub(crate) fn new() -> windows::core::Result<Self> {
-        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-        if hr.is_ok() {
-            Ok(Self { uninitialize: true })
-        } else if hr == RPC_E_CHANGED_MODE {
-            Ok(Self { uninitialize: false })
-        } else {
-            Err(hr.into())
-        }
-    }
-
-    /// 严格 MTA 获取：本线程已是其他 apartment（STA 等，RPC_E_CHANGED_MODE）时返回
-    /// Err 而非沿用现状。音频捕获入口（spawn_* / list_*）在调用线程侧必须用它，
-    /// 使「创建线程在 MTA」成为确定性前提而非注释约定。
-    pub(crate) fn acquire_mta() -> windows::core::Result<Self> {
-        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-        if hr.is_ok() {
-            Ok(Self { uninitialize: true })
-        } else {
-            Err(hr.into())
-        }
-    }
-}
-
-impl Drop for ComGuard {
-    fn drop(&mut self) {
-        if self.uninitialize {
-            unsafe { CoUninitialize() };
-        }
-    }
-}
 
 /// pid → 可执行文件名（不含路径）；查询失败（如受保护进程）返回 None
 fn process_exe_name(pid: u32) -> Option<String> {
@@ -79,7 +32,7 @@ fn process_exe_name(pid: u32) -> Option<String> {
 
 /// 枚举默认 render endpoint 上的音频会话 → (pid, exe 名) 列表
 pub(crate) fn enumerate_audio_sessions() -> Result<Vec<(u32, String)>> {
-    // 1. CoInitializeEx(None, COINIT_MULTITHREADED) 守卫（本文件私有的 ComGuard）
+    // 1. CoInitializeEx(None, COINIT_MULTITHREADED) 守卫（super::ComGuard 宽容变体）
     let _com = ComGuard::new()
         .map_err(|e| Error::AudioSource(format!("CoInitializeEx failed: {e}")))?;
 
@@ -110,6 +63,7 @@ pub(crate) fn enumerate_audio_sessions() -> Result<Vec<(u32, String)>> {
             }
         };
         let Ok(control2) = control.cast::<IAudioSessionControl2>() else {
+            tracing::warn!("GetSession({}) 转 IAudioSessionControl2 失败，跳过", i);
             continue;
         };
 

@@ -10,7 +10,7 @@
 
 use super::super::{CaptureKind, CaptureTarget};
 use super::convert::frames_to_pcm_i16;
-use super::session::ComGuard;
+use super::ComGuard;
 use crate::audio::AudioChunk;
 use crate::{Error, Result};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
@@ -60,7 +60,7 @@ struct EventGuard(HANDLE);
 
 impl Drop for EventGuard {
     fn drop(&mut self) {
-        unsafe { CloseHandle(self.0) };
+        let _ = unsafe { CloseHandle(self.0) };
     }
 }
 

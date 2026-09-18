@@ -8,7 +8,7 @@
 //! 每个 pid 一条线程（同名合并组由 Task 6 拆成多条 spawn）。
 
 use super::device::{start_audio_client_stream, MixFormat, MtaInterface, StreamHandle};
-use super::session::ComGuard;
+use super::ComGuard;
 use crate::audio::AudioChunk;
 use crate::{Error, Result};
 use std::sync::atomic::AtomicI64;

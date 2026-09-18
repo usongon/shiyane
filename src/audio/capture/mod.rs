@@ -17,11 +17,15 @@ pub(crate) fn f32_to_i16(sample: f32) -> i16 {
     (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
 }
 
+/// 仅 macOS 采集链路消费（Windows 转码链路全程 f32，无 i16 输入）
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn i16_to_f32(sample: i16) -> f32 {
     sample as f32 / i16::MAX as f32
 }
 
 /// 交错多声道 f32 → 单声道 f32（逐帧平均）
+/// 仅 Windows loopback 转码消费；mac 侧无生产者（仅单测引用）
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn mixdown_interleaved(samples: &[f32], channels: u16) -> Vec<f32> {
     if channels <= 1 {
         return samples.to_vec();
@@ -134,6 +138,7 @@ pub(crate) fn group_pids_by_name(apps: Vec<(String, i32)>) -> Vec<(String, Vec<i
 }
 
 /// Windows 系统噪音进程（小写 exe 名）；真机实测后校准（Task 13）
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) const WINDOWS_NOISE_EXES: &[&str] = &[
     "audiodg.exe",
     "svchost.exe",
@@ -152,11 +157,13 @@ pub(crate) const WINDOWS_NOISE_EXES: &[&str] = &[
     "wudfhost.exe",
 ];
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn is_noise_session(exe_lower: &str, pid: u32, own_pid: u32) -> bool {
     pid == own_pid || WINDOWS_NOISE_EXES.iter().any(|n| *n == exe_lower)
 }
 
 /// "chrome.exe" → "Chrome"（去 .exe 后首字母大写）
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn friendly_name_from_exe(exe: &str) -> String {
     let stem = exe.strip_suffix(".exe").unwrap_or(exe);
     let mut chars = stem.chars();
@@ -167,6 +174,7 @@ pub(crate) fn friendly_name_from_exe(exe: &str) -> String {
 }
 
 /// (pid, exe 名) 会话列表 → 系统音源条目：噪音/自身过滤 + 同名合并（id=system:{pid,...}）
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn build_system_targets(sessions: Vec<(u32, String)>, own_pid: u32) -> Vec<CaptureTarget> {
     let kept: Vec<(String, i32)> = sessions
         .into_iter()
