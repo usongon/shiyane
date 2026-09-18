@@ -48,7 +48,7 @@ export default function AboutModal({
           )}
         </div>
         <div style={{ fontSize: 12.5 }}>
-          独立开发者 <b>usong</b> 出品
+          Crafted by <b>usong</b>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
           <span style={{ fontSize: 12.5, color: token.colorTextSecondary }}>GitHub</span>
@@ -63,7 +63,7 @@ export default function AboutModal({
           </Typography.Text>
         </div>
         <span className="mono" style={{ fontSize: 10.5, color: token.colorTextTertiary, marginTop: 6 }}>
-          FSL-1.1-ALv2 · 非商用免费，商用需授权
+          FSL-1.1-ALv2 License
         </span>
       </div>
     </Modal>
