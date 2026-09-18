@@ -1,10 +1,12 @@
 //! 麦克风 + 整机（默认输出端点）loopback 采集线程。
 //!
-//! 结构约定：端点解析、Activate、GetMixFormat、Initialize、事件句柄、Start 等可失败的
-//! 同步步骤都在调用线程完成（失败直接返回 Err）；Start 之后的 event-driven 采集循环放
-//! 子线程（错误时 tracing::error 后退出，stop 置位后 ≤200ms 内收尾）。
-//! 采集循环 `run_event_capture_loop` 与 `start_audio_client_stream` 被 Task 5
-//! 进程树 loopback 复用。
+//! 结构约定：入口（`list_microphone_targets` / `spawn_device_loopback` /
+//! `spawn_microphone`）在调用线程顶部以 `ComGuard::acquire_mta()` 严格获取 MTA 守卫，
+//! 守卫贯穿端点解析、Activate、GetMixFormat、Initialize、事件句柄、Start 等可失败的
+//! 同步步骤（失败直接返回 Err），保证这些 COM 调用全程有线程 apartment 且确定在 MTA；
+//! Start 之后的 event-driven 采集循环放子线程（错误时 tracing::error 后退出，stop 置位
+//! 后 ≤200ms 内收尾）。采集循环 `run_event_capture_loop` 与 `start_audio_client_stream`
+//! 被 Task 5 进程树 loopback 复用。
 
 use super::super::{CaptureKind, CaptureTarget};
 use super::convert::frames_to_pcm_i16;
@@ -66,16 +68,27 @@ impl Drop for EventGuard {
 unsafe impl Send for EventGuard {}
 
 /// windows 0.61 起 COM 接口包装不再实现 Send。WASAPI 的 IAudioClient/IAudioCaptureClient
-/// 在 MTA 内跨线程调用安全（创建线程与采集线程均以 COINIT_MULTITHREADED 初始化，
-/// ComGuard 保证），故显式声明可跨线程传递。
+/// 在 MTA 内跨线程调用安全（创建线程经 `ComGuard::acquire_mta` 严格确认 MTA、采集线程
+/// 以 COINIT_MULTITHREADED 自行初始化），故显式声明可跨线程传递。
 pub(crate) struct MtaInterface<T>(pub(crate) T);
 
 // SAFETY: 仅用于创建线程与采集线程均为 MTA 的 WASAPI 接口（见类型注释）
 unsafe impl<T> Send for MtaInterface<T> {}
 
-fn device_enumerator() -> Result<IMMDeviceEnumerator> {
-    let _com = ComGuard::new()
-        .map_err(|e| Error::AudioSource(format!("CoInitializeEx failed: {e}")))?;
+/// 调用线程侧严格 MTA COM 守卫：持有期间本线程确定处于 MTA（否则 Err），
+/// 覆盖端点解析 → Activate → Initialize → Start 整个序列；Start 后接口经
+/// MtaInterface 移交子线程，其 SAFETY 前提（创建线程在 MTA）由本守卫确定性保证。
+fn caller_thread_com(tag: &str) -> Result<ComGuard> {
+    ComGuard::acquire_mta().map_err(|e| {
+        Error::AudioSource(format!(
+            "[{tag}] CoInitializeEx(MTA) 失败: {e}（音频捕获需在 MTA 线程初始化）"
+        ))
+    })
+}
+
+/// CoCreateInstance MMDeviceEnumerator。`_com` 参数是调用线程 ComGuard 存活的
+/// 编译期证明——本函数不得在无守卫作用域内调用（COM 调用须有 apartment）。
+fn device_enumerator(_com: &ComGuard) -> Result<IMMDeviceEnumerator> {
     unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
         .map_err(|e| Error::AudioSource(format!("CoCreateInstance(MMDeviceEnumerator) failed: {e}")))
 }
@@ -104,9 +117,11 @@ fn endpoint_friendly_name(device: &IMMDevice) -> Result<String> {
     }
 }
 
-/// 枚举活跃采集端点 → (设备, FriendlyName) 列表
-fn capture_endpoints() -> Result<Vec<(IMMDevice, String)>> {
-    let enumerator = device_enumerator()?;
+/// 枚举活跃采集端点 → (设备, FriendlyName) 列表。
+/// `_com` 参数要求调用线程 ComGuard 存活（EnumAudioEndpoints/OpenPropertyStore/GetValue
+/// 均为 COM 调用）。
+fn capture_endpoints(_com: &ComGuard) -> Result<Vec<(IMMDevice, String)>> {
+    let enumerator = device_enumerator(_com)?;
     let collection = unsafe { enumerator.EnumAudioEndpoints(eCapture, DEVICE_STATE_ACTIVE) }
         .map_err(|e| Error::AudioSource(format!("EnumAudioEndpoints(eCapture) failed: {e}")))?;
     let count = unsafe { collection.GetCount() }
@@ -143,7 +158,9 @@ unsafe fn mix_format_is_float(wfx: *const WAVEFORMATEX) -> bool {
 }
 
 pub(crate) fn list_microphone_targets() -> Result<Vec<CaptureTarget>> {
-    let endpoints = capture_endpoints()?;
+    // 调用线程侧 MTA 守卫贯穿整个枚举序列（参照 process.rs 的入口做法）
+    let _com = caller_thread_com("麦克风枚举")?;
+    let endpoints = capture_endpoints(&_com)?;
     Ok(endpoints
         .into_iter()
         .filter_map(|(device, name)| {
@@ -166,7 +183,10 @@ pub(crate) fn spawn_device_loopback(
     tx: mpsc::Sender<AudioChunk>,
     counter: Arc<AtomicI64>,
 ) -> Result<StreamHandle> {
-    let enumerator = device_enumerator()?;
+    // 调用线程侧 MTA 守卫贯穿：端点解析 → Activate → Initialize → Start
+    // （守卫随本函数作用域存活，覆盖 spawn_endpoint_stream 内全部 COM 调用）
+    let _com = caller_thread_com("整机 loopback")?;
+    let enumerator = device_enumerator(&_com)?;
     let endpoint = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }
         .map_err(|e| Error::AudioSource(format!("GetDefaultAudioEndpoint 失败: {e}")))?;
     spawn_endpoint_stream(
@@ -184,7 +204,10 @@ pub(crate) fn spawn_microphone(
     tx: mpsc::Sender<AudioChunk>,
     counter: Arc<AtomicI64>,
 ) -> Result<StreamHandle> {
-    let endpoints = capture_endpoints()?;
+    let tag = format!("麦克风 {friendly_name}");
+    // 调用线程侧 MTA 守卫贯穿：端点枚举匹配 → Activate → Initialize → Start
+    let _com = caller_thread_com(&tag)?;
+    let endpoints = capture_endpoints(&_com)?;
     let Some((device, _)) = endpoints
         .into_iter()
         .find(|(_, name)| name == friendly_name)
@@ -192,7 +215,7 @@ pub(crate) fn spawn_microphone(
         return Err(Error::AudioSource(format!("未找到麦克风 {friendly_name}")));
     };
     spawn_endpoint_stream(
-        format!("麦克风 {friendly_name}"),
+        tag,
         device,
         AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
         tx,

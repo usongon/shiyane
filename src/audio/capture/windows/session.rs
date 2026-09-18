@@ -13,8 +13,14 @@ use windows::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
-/// 每线程一次的 COM 初始化守卫：new() 调 CoInitializeEx(MTA)，Drop 调 CoUninitialize。
-/// 线程已按其他并发模型初始化（RPC_E_CHANGED_MODE）时沿用现状，不接管也不配对反初始化。
+/// 每线程一次的 COM 初始化守卫：获取时调 CoInitializeEx(MTA)，Drop 调 CoUninitialize。
+/// 两个获取变体：
+/// - [`ComGuard::new`]（宽容）：线程已按其他并发模型初始化（RPC_E_CHANGED_MODE）时
+///   沿用现状，不接管也不配对反初始化——适用于线程内自用、不向其他线程传递 COM
+///   接口的场景（如采集线程，新线程首次初始化必然 MTA 成功）。
+/// - [`ComGuard::acquire_mta`]（严格）：遇 RPC_E_CHANGED_MODE 返回 Err——音频捕获的
+///   调用线程侧序列（端点解析 → Activate → Initialize → Start）必须运行在 MTA，
+///   否则裸接口移交 MTA 采集线程不安全（MtaInterface 的 SAFETY 前提）。
 /// （Task 6 上移至 windows/mod.rs 共享）
 pub(crate) struct ComGuard {
     uninitialize: bool,
@@ -27,6 +33,18 @@ impl ComGuard {
             Ok(Self { uninitialize: true })
         } else if hr == RPC_E_CHANGED_MODE {
             Ok(Self { uninitialize: false })
+        } else {
+            Err(hr.into())
+        }
+    }
+
+    /// 严格 MTA 获取：本线程已是其他 apartment（STA 等，RPC_E_CHANGED_MODE）时返回
+    /// Err 而非沿用现状。音频捕获入口（spawn_* / list_*）在调用线程侧必须用它，
+    /// 使「创建线程在 MTA」成为确定性前提而非注释约定。
+    pub(crate) fn acquire_mta() -> windows::core::Result<Self> {
+        let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+        if hr.is_ok() {
+            Ok(Self { uninitialize: true })
         } else {
             Err(hr.into())
         }

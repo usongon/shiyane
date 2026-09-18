@@ -80,8 +80,14 @@ pub(crate) fn spawn_process_loopback(
     counter: Arc<AtomicI64>,
 ) -> Result<StreamHandle> {
     let tag = format!("进程 {pid} loopback");
-    let _com = ComGuard::new()
-        .map_err(|e| Error::AudioSource(format!("[{tag}] CoInitializeEx failed: {e}")))?;
+    // 调用线程侧严格 MTA 守卫：贯穿异步激活 → GetMixFormat → Initialize → Start，
+    // MtaInterface 的 SAFETY 前提（创建线程在 MTA）由此确定性保证
+    // （STA 调用线程会得到 Err 而非带着 STA apartment 跑完激活）
+    let _com = ComGuard::acquire_mta().map_err(|e| {
+        Error::AudioSource(format!(
+            "[{tag}] CoInitializeEx(MTA) 失败: {e}（音频捕获需在 MTA 线程初始化）"
+        ))
+    })?;
 
     // 1. 激活参数：AUDIOCLIENT_ACTIVATION_PARAMS 装进 VT_BLOB PropVariant
     //    （pBlobData 指向栈上结构——不可 PropVariantClear，否则会对栈指针 CoTaskMemFree）
