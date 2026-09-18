@@ -508,22 +508,92 @@ impl CaptureSource for MacOSCaptureSource {
         #[cfg(target_os = "macos")]
         {
             if let Ok(content) = screencapturekit::prelude::SCShareableContent::get() {
+                let mut filtered = 0;
                 for app in content.applications() {
                     let name = app.application_name();
                     let pid = app.process_id();
-                    if !name.is_empty() {
-                        targets.push(CaptureTarget {
-                            // PID 只进 id（选择键），不进展示名——用户不关心
-                            id: format!("system:{}", pid),
-                            name,
-                            kind: CaptureKind::SystemAudio,
-                            icon_path: None,
-                        });
+                    if name.is_empty() {
+                        continue;
                     }
+                    if is_noise_process(&name, &app.bundle_identifier()) {
+                        filtered += 1;
+                        continue;
+                    }
+                    targets.push(CaptureTarget {
+                        // PID 只进 id（选择键），不进展示名——用户不关心
+                        id: format!("system:{}", pid),
+                        name,
+                        kind: CaptureKind::SystemAudio,
+                        icon_path: None,
+                    });
+                }
+                if filtered > 0 {
+                    tracing::debug!("已隐藏 {} 个不发声的系统进程", filtered);
                 }
             }
         }
 
         Ok(targets)
+    }
+}
+
+/// 苹果自家会发声的应用白名单（bundle ID 前缀，小写比较）；
+/// 其余 com.apple.*（通知中心、菜单栏 agent、系统设置等）不发声，隐藏
+const APPLE_AUDIO_APPS: &[&str] = &[
+    "com.apple.safari",
+    "com.apple.music",
+    "com.apple.podcasts",
+    "com.apple.tv",
+    "com.apple.quicktimeplayer",
+    "com.apple.facetime",
+    "com.apple.voicememos",
+    "com.apple.maps",
+    "com.apple.garageband",
+    "com.apple.logic",
+];
+
+/// 过滤 ScreenCaptureKit 枚举出的不发声进程：
+/// 「自动填充 (XX)」是各 App 的密码/表单填充辅助进程，从不发声
+fn is_noise_process(name: &str, bundle_id: &str) -> bool {
+    if name.starts_with("自动填充") {
+        return true;
+    }
+    let bundle_lower = bundle_id.to_ascii_lowercase();
+    if !bundle_lower.starts_with("com.apple.") {
+        return false;
+    }
+    !APPLE_AUDIO_APPS.iter().any(|b| bundle_lower.starts_with(b))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_noise_process;
+
+    #[test]
+    fn filters_autofill_helpers() {
+        assert!(is_noise_process("自动填充 (Qoder)", "com.qoder.app"));
+        assert!(is_noise_process("自动填充 (微信)", "com.tencent.xinWeChat"));
+    }
+
+    #[test]
+    fn filters_apple_system_processes() {
+        assert!(is_noise_process("UserNotificationCenter", "com.apple.usernotifications.agent"));
+        assert!(is_noise_process("MenuBarAgent", "com.apple.menuagent"));
+        assert!(is_noise_process("CursorUIViewService", "com.apple.CursorUIService"));
+        assert!(is_noise_process("系统设置", "com.apple.systempreferences"));
+    }
+
+    #[test]
+    fn keeps_audio_capable_apps() {
+        assert!(!is_noise_process("Safari", "com.apple.Safari"));
+        assert!(!is_noise_process("音乐", "com.apple.Music"));
+        assert!(!is_noise_process("QuickTime Player", "com.apple.QuickTimePlayer"));
+        assert!(!is_noise_process("GarageBand", "com.apple.garageband10"));
+    }
+
+    #[test]
+    fn keeps_third_party_apps() {
+        assert!(!is_noise_process("微信", "com.tencent.xinWeChat"));
+        assert!(!is_noise_process("Google Chrome", "com.google.Chrome"));
     }
 }
