@@ -9,7 +9,9 @@ import {
   Select,
   Slider,
   theme as antdTheme,
+  Typography,
 } from "antd";
+import { getVersion } from "@tauri-apps/api/app";
 import { ApiOutlined } from "@ant-design/icons";
 import { BackendContext } from "../lib/backend";
 import { getOverlayOpacity, setOverlayOpacity } from "../lib/overlay-style";
@@ -119,6 +121,11 @@ export default function SettingsDrawer({
   const [saving, setSaving] = useState(false);
   const [testingAsr, setTestingAsr] = useState(false);
   const [testingTranslate, setTestingTranslate] = useState(false);
+  const [appVersion, setAppVersion] = useState("");
+
+  useEffect(() => {
+    getVersion().then(setAppVersion).catch(() => setAppVersion(""));
+  }, []);
 
   const load = async () => {
     setLoading(true);
@@ -335,6 +342,39 @@ export default function SettingsDrawer({
           style={{ fontSize: 10.5, color: token.colorTextTertiary, display: "block" }}
         >
           拖动即生效，悬浮窗打开时实时变化
+        </span>
+      </div>
+
+      <Divider orientation="left" plain style={{ fontSize: 12 }}>
+        关于
+      </Divider>
+      <div style={{ padding: "0 4px", fontSize: 12.5, display: "flex", flexDirection: "column", gap: 4 }}>
+        <div style={{ fontWeight: 600 }}>
+          拾言 Shiyane
+          {appVersion && (
+            <span className="mono" style={{ marginLeft: 8, fontSize: 11, color: token.colorTextTertiary }}>
+              v{appVersion}
+            </span>
+          )}
+        </div>
+        <div>独立开发者 <b>usong</b> 出品</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ color: token.colorTextSecondary }}>GitHub</span>
+          <Typography.Text copyable={{ text: "https://github.com/usongon" }} style={{ fontSize: 12.5 }}>
+            github.com/usongon
+          </Typography.Text>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ color: token.colorTextSecondary }}>邮箱</span>
+          <Typography.Text copyable={{ text: "zdhuntero@gmail.com" }} style={{ fontSize: 12.5 }}>
+            zdhuntero@gmail.com
+          </Typography.Text>
+        </div>
+        <span
+          className="mono"
+          style={{ fontSize: 10.5, color: token.colorTextTertiary, marginTop: 2 }}
+        >
+          FSL-1.1-ALv2 · 非商用免费，商用需授权
         </span>
       </div>
 
