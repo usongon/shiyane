@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 pub(crate) mod convert;
+pub(crate) mod session;
 
 pub struct WindowsCaptureSource;
 

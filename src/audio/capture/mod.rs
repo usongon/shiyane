@@ -133,6 +133,65 @@ pub(crate) fn group_pids_by_name(apps: Vec<(String, i32)>) -> Vec<(String, Vec<i
     groups
 }
 
+/// Windows 系统噪音进程（小写 exe 名）；真机实测后校准（Task 13）
+pub(crate) const WINDOWS_NOISE_EXES: &[&str] = &[
+    "audiodg.exe",
+    "svchost.exe",
+    "csrss.exe",
+    "dwm.exe",
+    "runtimebroker.exe",
+    "applicationframehost.exe",
+    "searchhost.exe",
+    "startmenuexperiencehost.exe",
+    "shellexperiencehost.exe",
+    "sihost.exe",
+    "taskhostw.exe",
+    "ctfmon.exe",
+    "conhost.exe",
+    "fontdrvhost.exe",
+    "wudfhost.exe",
+];
+
+pub(crate) fn is_noise_session(exe_lower: &str, pid: u32, own_pid: u32) -> bool {
+    pid == own_pid || WINDOWS_NOISE_EXES.iter().any(|n| *n == exe_lower)
+}
+
+/// "chrome.exe" → "Chrome"（去 .exe 后首字母大写）
+pub(crate) fn friendly_name_from_exe(exe: &str) -> String {
+    let stem = exe.strip_suffix(".exe").unwrap_or(exe);
+    let mut chars = stem.chars();
+    match chars.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// (pid, exe 名) 会话列表 → 系统音源条目：噪音/自身过滤 + 同名合并（id=system:{pid,...}）
+pub(crate) fn build_system_targets(sessions: Vec<(u32, String)>, own_pid: u32) -> Vec<CaptureTarget> {
+    let kept: Vec<(String, i32)> = sessions
+        .into_iter()
+        .filter_map(|(pid, exe)| {
+            let name = friendly_name_from_exe(&exe);
+            if name.is_empty() || is_noise_session(&exe.to_lowercase(), pid, own_pid) {
+                return None;
+            }
+            Some((name, pid as i32))
+        })
+        .collect();
+    group_pids_by_name(kept)
+        .into_iter()
+        .map(|(name, pids)| {
+            let id = pids.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",");
+            CaptureTarget {
+                id: format!("system:{}", id),
+                name,
+                kind: CaptureKind::SystemAudio,
+                icon_path: None,
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureTarget {
     pub id: String,
@@ -191,5 +250,44 @@ mod tests {
     #[test]
     fn mixdown_mono_passthrough() {
         assert_eq!(mixdown_interleaved(&[0.25, -0.75], 1), vec![0.25, -0.75]);
+    }
+
+    use super::{build_system_targets, friendly_name_from_exe, is_noise_session};
+
+    const OWN_PID: u32 = 42;
+
+    #[test]
+    fn noise_exes_filtered() {
+        assert!(is_noise_session("audiodg.exe", 1, OWN_PID));
+        assert!(is_noise_session("svchost.exe", 2, OWN_PID));
+        assert!(!is_noise_session("chrome.exe", 3, OWN_PID));
+    }
+
+    #[test]
+    fn own_pid_filtered() {
+        assert!(is_noise_session("shiyane.exe", OWN_PID, OWN_PID));
+    }
+
+    #[test]
+    fn exe_name_to_friendly() {
+        assert_eq!(friendly_name_from_exe("chrome.exe"), "Chrome");
+        assert_eq!(friendly_name_from_exe("cloudmusic.exe"), "Cloudmusic");
+        assert_eq!(friendly_name_from_exe("QQ"), "QQ");
+    }
+
+    #[test]
+    fn build_targets_merges_and_filters() {
+        let targets = build_system_targets(
+            vec![
+                (100, "chrome.exe".to_string()),
+                (200, "chrome.exe".to_string()),
+                (300, "audiodg.exe".to_string()),
+                (OWN_PID, "shiyane.exe".to_string()),
+            ],
+            OWN_PID,
+        );
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].id, "system:100,200");
+        assert_eq!(targets[0].name, "Chrome");
     }
 }
