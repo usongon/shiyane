@@ -21,6 +21,18 @@ pub(crate) fn i16_to_f32(sample: i16) -> f32 {
     sample as f32 / i16::MAX as f32
 }
 
+/// 交错多声道 f32 → 单声道 f32（逐帧平均）
+pub(crate) fn mixdown_interleaved(samples: &[f32], channels: u16) -> Vec<f32> {
+    if channels <= 1 {
+        return samples.to_vec();
+    }
+    let ch = channels as usize;
+    samples
+        .chunks(ch)
+        .map(|frame| frame.iter().sum::<f32>() / ch as f32)
+        .collect()
+}
+
 /// 重采样 f32 数据到 16kHz mono，输出 i16
 pub(crate) fn resample_to_target(
     samples: &[f32],
@@ -166,5 +178,18 @@ mod tests {
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0], ("微信".to_string(), vec![2120, 10804]));
         assert_eq!(groups[1], ("Chrome".to_string(), vec![300]));
+    }
+
+    use super::mixdown_interleaved;
+
+    #[test]
+    fn mixdown_stereo_averages_channels() {
+        // L=1.0, R=-1.0 → 0.0；L=0.5, R=0.25 → 0.375
+        assert_eq!(mixdown_interleaved(&[1.0, -1.0, 0.5, 0.25], 2), vec![0.0, 0.375]);
+    }
+
+    #[test]
+    fn mixdown_mono_passthrough() {
+        assert_eq!(mixdown_interleaved(&[0.25, -0.75], 1), vec![0.25, -0.75]);
     }
 }
