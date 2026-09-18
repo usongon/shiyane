@@ -4,6 +4,14 @@
 
 [English](README.en.md)
 
+## 预览
+
+| 文件转字幕 | 实时字幕 · 音源选择 |
+|:---:|:---:|
+| <img src="docs/images/home-file-subtitle.png" width="400" alt="文件转字幕首页"> | <img src="docs/images/realtime-source-select.png" width="400" alt="实时字幕音源选择"> |
+| **实时字幕 · 原文与译文** | **悬浮字幕 · 置顶歌词条** |
+| <img src="docs/images/realtime-translation.png" width="400" alt="实时字幕翻译效果"> | <img src="docs/images/realtime-overlay.png" width="400" alt="桌面悬浮字幕"> |
+
 ## 工作流程
 
 1. **拖入视频文件**（支持 mp4、mkv、avi、mov 等格式）
