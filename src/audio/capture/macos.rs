@@ -166,20 +166,29 @@ impl MacOSCaptureSource {
                 .with_display(&displays[0])
                 .with_excluding_windows(&[])
                 .build()
-        } else if let Some(pid_str) = target_id.strip_prefix("system:") {
-            // 特定进程音频
-            let pid: i32 = pid_str.parse().map_err(|_| {
-                Error::AudioSource(format!("无效的进程 ID: {}", pid_str))
-            })?;
+        } else if let Some(pid_part) = target_id.strip_prefix("system:") {
+            // 特定进程音频（同名进程合并后可能携带多个 pid）
+            let pids: Vec<i32> = pid_part
+                .split(',')
+                .map(|s| s.parse::<i32>())
+                .collect::<std::result::Result<_, _>>()
+                .map_err(|_| Error::AudioSource(format!("无效的进程 ID: {}", target_id)))?;
 
             let apps = content.applications();
-            let app = apps.iter().find(|a| a.process_id() == pid).ok_or_else(|| {
-                Error::AudioSource(format!("找不到进程 ID 为 {} 的应用", pid))
-            })?;
+            let matched: Vec<_> = apps
+                .iter()
+                .filter(|a| pids.contains(&a.process_id()))
+                .collect();
+            if matched.is_empty() {
+                return Err(Error::AudioSource(format!(
+                    "找不到进程 ID 为 {} 的应用",
+                    pid_part
+                )));
+            }
 
             SCContentFilter::create()
                 .with_display(&displays[0])
-                .with_including_applications(&[app], &[])
+                .with_including_applications(&matched, &[])
                 .build()
         } else {
             return Err(Error::AudioSource(format!(
@@ -508,27 +517,45 @@ impl CaptureSource for MacOSCaptureSource {
         #[cfg(target_os = "macos")]
         {
             if let Ok(content) = screencapturekit::prelude::SCShareableContent::get() {
+                let own_pid = std::process::id() as i32;
                 let mut filtered = 0;
-                for app in content.applications() {
-                    let name = app.application_name();
-                    let pid = app.process_id();
-                    if name.is_empty() {
-                        continue;
+                let kept: Vec<(String, i32)> = content
+                    .applications()
+                    .iter()
+                    .filter_map(|app| {
+                        let name = app.application_name();
+                        let pid = app.process_id();
+                        if name.is_empty() {
+                            return None;
+                        }
+                        if is_noise_process(&name, &app.bundle_identifier(), pid, own_pid) {
+                            filtered += 1;
+                            return None;
+                        }
+                        Some((name, pid))
+                    })
+                    .collect();
+                if filtered > 0 {
+                    tracing::debug!("已隐藏 {} 个不发声的系统进程", filtered);
+                }
+                // 同名进程（如微信的内核/播放器辅助进程）合并为一个音源，
+                // id 记录全部 pid，过滤器会一并包含
+                for (name, pids) in group_pids_by_name(kept) {
+                    if pids.len() > 1 {
+                        tracing::debug!("同名进程合并为单音源: {} pids={:?}", name, pids);
                     }
-                    if is_noise_process(&name, &app.bundle_identifier()) {
-                        filtered += 1;
-                        continue;
-                    }
+                    let id = pids
+                        .iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>()
+                        .join(",");
                     targets.push(CaptureTarget {
                         // PID 只进 id（选择键），不进展示名——用户不关心
-                        id: format!("system:{}", pid),
+                        id: format!("system:{}", id),
                         name,
                         kind: CaptureKind::SystemAudio,
                         icon_path: None,
                     });
-                }
-                if filtered > 0 {
-                    tracing::debug!("已隐藏 {} 个不发声的系统进程", filtered);
                 }
             }
         }
@@ -552,10 +579,19 @@ const APPLE_AUDIO_APPS: &[&str] = &[
     "com.apple.logic",
 ];
 
+/// 本应用自身的 bundle ID
+const OWN_BUNDLE_ID: &str = "com.usongon.shiyane";
+
 /// 过滤 ScreenCaptureKit 枚举出的不发声进程：
-/// 「自动填充 (XX)」是各 App 的密码/表单填充辅助进程，从不发声
-fn is_noise_process(name: &str, bundle_id: &str) -> bool {
-    if name.starts_with("自动填充") {
+/// - 「自动填充 (XX) / AutoFill(XX)」是各 App 的密码/表单填充辅助进程，从不发声
+/// - 本应用自身
+/// - com.apple.* 中不在发声白名单里的系统进程
+fn is_noise_process(name: &str, bundle_id: &str, pid: i32, own_pid: i32) -> bool {
+    let name_lower = name.trim().to_lowercase();
+    if name.starts_with("自动填充") || name_lower.starts_with("autofill") {
+        return true;
+    }
+    if pid == own_pid || bundle_id.eq_ignore_ascii_case(OWN_BUNDLE_ID) {
         return true;
     }
     let bundle_lower = bundle_id.to_ascii_lowercase();
@@ -565,35 +601,75 @@ fn is_noise_process(name: &str, bundle_id: &str) -> bool {
     !APPLE_AUDIO_APPS.iter().any(|b| bundle_lower.starts_with(b))
 }
 
+/// 按显示名分组 pid，保持首次出现顺序
+fn group_pids_by_name(apps: Vec<(String, i32)>) -> Vec<(String, Vec<i32>)> {
+    let mut groups: Vec<(String, Vec<i32>)> = Vec::new();
+    for (name, pid) in apps {
+        match groups.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, pids)) => pids.push(pid),
+            None => groups.push((name, vec![pid])),
+        }
+    }
+    groups
+}
+
 #[cfg(test)]
 mod tests {
-    use super::is_noise_process;
+    use super::{group_pids_by_name, is_noise_process};
+
+    const OWN_PID: i32 = 42;
 
     #[test]
     fn filters_autofill_helpers() {
-        assert!(is_noise_process("自动填充 (Qoder)", "com.qoder.app"));
-        assert!(is_noise_process("自动填充 (微信)", "com.tencent.xinWeChat"));
+        assert!(is_noise_process("自动填充 (Qoder)", "com.qoder.app", 1, OWN_PID));
+        assert!(is_noise_process("自动填充 (微信)", "com.tencent.xinWeChat", 2, OWN_PID));
+        assert!(is_noise_process("AutoFill(FlClash)", "com.follow.clash", 3, OWN_PID));
+        assert!(is_noise_process("Autofill (Chrome)", "com.google.Chrome", 4, OWN_PID));
+    }
+
+    #[test]
+    fn filters_self() {
+        assert!(is_noise_process("拾言", "com.usongon.shiyane", OWN_PID, OWN_PID));
+        assert!(is_noise_process("Shiyane Helper", "com.usongon.shiyane", 50, OWN_PID));
     }
 
     #[test]
     fn filters_apple_system_processes() {
-        assert!(is_noise_process("UserNotificationCenter", "com.apple.usernotifications.agent"));
-        assert!(is_noise_process("MenuBarAgent", "com.apple.menuagent"));
-        assert!(is_noise_process("CursorUIViewService", "com.apple.CursorUIService"));
-        assert!(is_noise_process("系统设置", "com.apple.systempreferences"));
+        assert!(is_noise_process(
+            "UserNotificationCenter",
+            "com.apple.usernotifications.agent",
+            7,
+            OWN_PID
+        ));
+        assert!(is_noise_process("MenuBarAgent", "com.apple.menuagent", 8, OWN_PID));
+        assert!(is_noise_process("CursorUIViewService", "com.apple.CursorUIService", 9, OWN_PID));
+        assert!(is_noise_process("系统设置", "com.apple.systempreferences", 10, OWN_PID));
     }
 
     #[test]
     fn keeps_audio_capable_apps() {
-        assert!(!is_noise_process("Safari", "com.apple.Safari"));
-        assert!(!is_noise_process("音乐", "com.apple.Music"));
-        assert!(!is_noise_process("QuickTime Player", "com.apple.QuickTimePlayer"));
-        assert!(!is_noise_process("GarageBand", "com.apple.garageband10"));
+        assert!(!is_noise_process("Safari", "com.apple.Safari", 11, OWN_PID));
+        assert!(!is_noise_process("音乐", "com.apple.Music", 12, OWN_PID));
+        assert!(!is_noise_process("QuickTime Player", "com.apple.QuickTimePlayer", 13, OWN_PID));
+        assert!(!is_noise_process("GarageBand", "com.apple.garageband10", 14, OWN_PID));
     }
 
     #[test]
     fn keeps_third_party_apps() {
-        assert!(!is_noise_process("微信", "com.tencent.xinWeChat"));
-        assert!(!is_noise_process("Google Chrome", "com.google.Chrome"));
+        assert!(!is_noise_process("微信", "com.tencent.xinWeChat", 15, OWN_PID));
+        assert!(!is_noise_process("Google Chrome", "com.google.Chrome", 16, OWN_PID));
+    }
+
+    #[test]
+    fn merges_same_name_pids() {
+        let groups = group_pids_by_name(vec![
+            ("微信".to_string(), 2120),
+            ("Chrome".to_string(), 300),
+            ("微信".to_string(), 10804),
+            ("微信".to_string(), 10802),
+        ]);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0], ("微信".to_string(), vec![2120, 10804, 10802]));
+        assert_eq!(groups[1], ("Chrome".to_string(), vec![300]));
     }
 }
