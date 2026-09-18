@@ -449,7 +449,7 @@ body {
 
 /* 音源列表自身限高滚动（进程可达几十个），语言/按钮不被推出视口 */
 .realtime-targets {
-  max-height: 240px;
+  max-height: 140px;
   overflow-y: auto;
   padding-right: 6px;
 }
