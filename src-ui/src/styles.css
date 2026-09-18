@@ -620,3 +620,8 @@ body {
   -webkit-line-clamp: unset;
   overflow: visible;
 }
+
+/* Windows：无红绿灯，左侧留白收缩；不可拖拽（原生标题栏负责） */
+.titlebar-win .titlebar-left {
+  min-width: 0;
+}

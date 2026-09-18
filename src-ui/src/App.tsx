@@ -37,12 +37,20 @@ export default function App() {
   const [aboutOpen, setAboutOpen] = useState(false);
   const backend = useMemo(() => getBackend(), []);
   const [config, setConfig] = useState<AppConfig | null>(null);
+  const [platform, setPlatform] = useState<"macos" | "windows">("macos");
 
   useEffect(() => {
     backend
       .getConfig()
       .then(setConfig)
       .catch(() => setConfig(null));
+  }, [backend]);
+
+  useEffect(() => {
+    backend
+      .getHostPlatform()
+      .then(setPlatform)
+      .catch(() => setPlatform("macos"));
   }, [backend]);
 
   // 原生菜单栏 拾言 → 关于拾言 触发
@@ -74,34 +82,64 @@ export default function App() {
       <BackendContext.Provider value={backend}>
         <AntdApp>
           <div style={{ height: "100vh", display: "flex", flexDirection: "column" }}>
-            {/* macOS Overlay：红绿灯悬浮左侧，中央分段导航，右侧设置齿轮；整条空白处可拖拽窗口 */}
-            <div className="titlebar" data-tauri-drag-region>
-              <div className="titlebar-zone titlebar-left" data-tauri-drag-region />
-              <Segmented
-                value={view}
-                onChange={(v) => setView(v as ViewKey)}
-                options={SEG_OPTIONS}
-                aria-label="主导航"
-              />
-              <div className="titlebar-zone titlebar-right" data-tauri-drag-region>
-                {backend.mocked && (
-                  <span className="demo-pill mono">
-                    <i />
-                    DEMO
-                  </span>
-                )}
-                <Tooltip title="设置">
-                  <Button
-                    type={settingsOpen ? "primary" : "text"}
-                    shape="circle"
-                    size="small"
-                    icon={<SettingOutlined />}
-                    aria-label="设置"
-                    onClick={() => setSettingsOpen(true)}
-                  />
-                </Tooltip>
+            {/* macOS Overlay 标题栏 / Windows 原生标题栏下只渲染工具行（无拖拽区、无红绿灯留白） */}
+            {platform === "macos" ? (
+              <div className="titlebar" data-tauri-drag-region>
+                <div className="titlebar-zone titlebar-left" data-tauri-drag-region />
+                <Segmented
+                  value={view}
+                  onChange={(v) => setView(v as ViewKey)}
+                  options={SEG_OPTIONS}
+                  aria-label="主导航"
+                />
+                <div className="titlebar-zone titlebar-right" data-tauri-drag-region>
+                  {backend.mocked && (
+                    <span className="demo-pill mono">
+                      <i />
+                      DEMO
+                    </span>
+                  )}
+                  <Tooltip title="设置">
+                    <Button
+                      type={settingsOpen ? "primary" : "text"}
+                      shape="circle"
+                      size="small"
+                      icon={<SettingOutlined />}
+                      aria-label="设置"
+                      onClick={() => setSettingsOpen(true)}
+                    />
+                  </Tooltip>
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="titlebar titlebar-win">
+                <div className="titlebar-zone titlebar-left" />
+                <Segmented
+                  value={view}
+                  onChange={(v) => setView(v as ViewKey)}
+                  options={SEG_OPTIONS}
+                  aria-label="主导航"
+                />
+                <div className="titlebar-zone titlebar-right">
+                  {backend.mocked && (
+                    <span className="demo-pill mono">
+                      <i />
+                      DEMO
+                    </span>
+                  )}
+                  <Tooltip title="设置">
+                    <Button
+                      type={settingsOpen ? "primary" : "text"}
+                      shape="circle"
+                      size="small"
+                      icon={<SettingOutlined />}
+                      aria-label="设置"
+                      onClick={() => setSettingsOpen(true)}
+                    />
+                  </Tooltip>
+                </div>
+              </div>
+            )}
 
             <div className="app-body">
               {/* 两个主视图常驻挂载，保留状态；拖拽监听不因切页而丢失 */}
