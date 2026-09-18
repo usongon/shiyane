@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { App as AntdApp, Button, ConfigProvider, Segmented, Tooltip } from "antd";
 import { SettingOutlined } from "@ant-design/icons";
 import { BackendContext, getBackend } from "./lib/backend";
@@ -7,6 +8,7 @@ import type { AppConfig } from "./lib/types";
 import FilePage from "./views/FilePage";
 import RealtimePage from "./views/RealtimePage";
 import OverlayPage from "./views/OverlayPage";
+import AboutModal from "./views/AboutModal";
 import SettingsDrawer from "./views/SettingsDrawer";
 import "./styles.css";
 
@@ -32,6 +34,7 @@ export default function App() {
 
   const [view, setView] = useState<ViewKey>("file");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
   const backend = useMemo(() => getBackend(), []);
   const [config, setConfig] = useState<AppConfig | null>(null);
 
@@ -40,6 +43,15 @@ export default function App() {
       .getConfig()
       .then(setConfig)
       .catch(() => setConfig(null));
+  }, [backend]);
+
+  // 原生菜单栏 拾言 → 关于拾言 触发
+  useEffect(() => {
+    if (backend.mocked) return;
+    const unlisten = listen("open-about", () => setAboutOpen(true));
+    return () => {
+      unlisten.then((fn) => fn());
+    };
   }, [backend]);
 
   // Overlay 窗口渲染精简版
@@ -124,6 +136,7 @@ export default function App() {
             </div>
 
             <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+            <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} />
           </div>
         </AntdApp>
       </BackendContext.Provider>
