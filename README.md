@@ -129,4 +129,4 @@ src-ui/            # 前端（React + TypeScript）
 
 ## 许可证
 
-MIT
+[FSL-1.1-ALv2](LICENSE) — 非商用免费使用，商用需授权；发布两年后自动转为 Apache 2.0。

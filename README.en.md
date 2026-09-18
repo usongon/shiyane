@@ -123,4 +123,4 @@ src-ui/            # Frontend (React + TypeScript)
 
 ## License
 
-MIT
+[FSL-1.1-ALv2](LICENSE) — free for non-commercial use; commercial use requires a license. Converts to Apache 2.0 two years after release.
