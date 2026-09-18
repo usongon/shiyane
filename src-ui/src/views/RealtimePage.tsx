@@ -2,7 +2,6 @@ import { useCallback, useContext, useEffect, useRef, useState } from "react";
 import {
   App as AntdApp,
   Button,
-  Checkbox,
   Select,
   Tooltip,
   Typography,
@@ -205,6 +204,30 @@ export default function RealtimePage({ active }: { active: boolean }) {
     return `${h.toString().padStart(2, "0")}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
   };
 
+  // 音源下拉：系统 / 应用 / 麦克风 三组，组内按名称排序（中文按拼音序）
+  const collator = new Intl.Collator("zh-Hans-CN", { numeric: true });
+  const toOption = (t: CaptureTarget) => ({ value: t.id, label: t.name });
+  const sorted = (list: CaptureTarget[]) =>
+    [...list].sort((a, b) => collator.compare(a.name, b.name));
+
+  const systemTarget = targets.find((t) => t.id === "system:all");
+  const appTargets = sorted(
+    targets.filter((t) => t.id.startsWith("system:") && t.id !== "system:all")
+  );
+  const micTargets = sorted(targets.filter((t) => t.kind === "microphone"));
+
+  const targetOptions = [
+    ...(systemTarget
+      ? [{ label: "系统", options: [toOption(systemTarget)] }]
+      : []),
+    ...(appTargets.length
+      ? [{ label: "应用", options: appTargets.map(toOption) }]
+      : []),
+    ...(micTargets.length
+      ? [{ label: "麦克风", options: micTargets.map(toOption) }]
+      : []),
+  ];
+
   const isListening = state === "listening";
   const isPaused = state === "paused";
   const isIdle = state === "idle";
@@ -226,18 +249,17 @@ export default function RealtimePage({ active }: { active: boolean }) {
           <div className="realtime-form">
             <div className="realtime-form-section">
               <div className="realtime-form-label">音源选择</div>
-              <div className="realtime-targets">
-                <Checkbox.Group
-                  value={selectedTargets}
-                  onChange={(vals) => setSelectedTargets(vals as string[])}
-                >
-                  {targets.map((t) => (
-                    <div key={t.id} className="realtime-target-row">
-                      <Checkbox value={t.id}>{t.name}</Checkbox>
-                    </div>
-                  ))}
-                </Checkbox.Group>
-              </div>
+              <Select
+                mode="multiple"
+                showSearch
+                placeholder="搜索或选择音源"
+                value={selectedTargets}
+                onChange={setSelectedTargets}
+                options={targetOptions}
+                optionFilterProp="label"
+                maxTagCount="responsive"
+                style={{ width: "100%", textAlign: "left" }}
+              />
             </div>
 
             <div className="realtime-form-section">
