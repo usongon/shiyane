@@ -121,6 +121,19 @@ pub async fn save_config(config: AppConfig, state: State<'_, AppState>) -> Resul
     Ok(())
 }
 
+/// 宿主平台标识（"macos" | "windows" | 其他 OS 常量），前端经
+/// invoke("get_host_platform") 区分平台分支（如 About 展示路径）
+#[tauri::command]
+pub fn get_host_platform() -> String {
+    if cfg!(target_os = "macos") {
+        "macos".to_string()
+    } else if cfg!(target_os = "windows") {
+        "windows".to_string()
+    } else {
+        std::env::consts::OS.to_string()
+    }
+}
+
 #[tauri::command]
 pub async fn start_file_processing(
     video_path: String,

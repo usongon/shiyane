@@ -14,36 +14,50 @@ use tokio::sync::Mutex;
 /// 原生菜单栏。「关于拾言」走自定义菜单项发事件给前端弹 About——
 /// 原生 About 面板在 macOS 只显示版本/版权，放不下 GitHub/邮箱等署名信息
 fn app_menu(handle: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
-    let app_submenu = SubmenuBuilder::new(handle, "拾言")
-        .text("about", "关于拾言")
-        .separator()
-        .services()
-        .separator()
-        .hide()
-        .hide_others()
-        .show_all()
-        .separator()
-        .quit()
-        .build()?;
+    #[cfg(target_os = "macos")]
+    {
+        let app_submenu = SubmenuBuilder::new(handle, "拾言")
+            .text("about", "关于拾言")
+            .separator()
+            .services()
+            .separator()
+            .hide()
+            .hide_others()
+            .show_all()
+            .separator()
+            .quit()
+            .build()?;
 
-    let edit_submenu = SubmenuBuilder::new(handle, "编辑")
-        .undo()
-        .redo()
-        .separator()
-        .cut()
-        .copy()
-        .paste()
-        .select_all()
-        .build()?;
+        let edit_submenu = SubmenuBuilder::new(handle, "编辑")
+            .undo()
+            .redo()
+            .separator()
+            .cut()
+            .copy()
+            .paste()
+            .select_all()
+            .build()?;
 
-    let window_submenu = SubmenuBuilder::new(handle, "窗口")
-        .minimize()
-        .maximize()
-        .separator()
-        .close_window()
-        .build()?;
+        let window_submenu = SubmenuBuilder::new(handle, "窗口")
+            .minimize()
+            .maximize()
+            .separator()
+            .close_window()
+            .build()?;
 
-    Menu::with_items(handle, &[&app_submenu, &edit_submenu, &window_submenu])
+        Menu::with_items(handle, &[&app_submenu, &edit_submenu, &window_submenu])
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Windows 主窗口走原生系统标题栏（无 mac 菜单栏），仅保留
+        // 「帮助」菜单：About 入口与退出快捷键
+        let help_submenu = SubmenuBuilder::new(handle, "帮助")
+            .text("about", "关于拾言")
+            .separator()
+            .quit()
+            .build()?;
+        Menu::with_items(handle, &[&help_submenu])
+    }
 }
 
 fn main() {
@@ -169,6 +183,7 @@ fn main() {
             test_translate_connection,
             list_recent_tasks,
             get_task_status,
+            commands::get_host_platform,
             commands::realtime::start_realtime_session,
             commands::realtime::pause_realtime_session,
             commands::realtime::resume_realtime_session,
