@@ -4,6 +4,14 @@ Video-to-bilingual-subtitle tool + realtime subtitles. Drop a video to export SR
 
 [中文文档](README.md)
 
+## Screenshots
+
+| File to subtitles | Realtime · audio source |
+|:---:|:---:|
+| <img src="docs/images/home-file-subtitle.png" width="400" alt="File-to-subtitle home"> | <img src="docs/images/realtime-source-select.png" width="400" alt="Realtime audio source picker"> |
+| **Realtime · source + translation** | **Floating overlay · always on top** |
+| <img src="docs/images/realtime-translation.png" width="400" alt="Realtime translation"> | <img src="docs/images/realtime-overlay.png" width="400" alt="Floating subtitle overlay"> |
+
 ## How it works
 
 1. **Drop a video file** (mp4, mkv, avi, mov, ...)
