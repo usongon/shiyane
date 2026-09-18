@@ -1,7 +1,7 @@
 pub mod keystore;
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,14 +74,12 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
-    pub fn config_path() -> Result<PathBuf> {
-        let home = dirs::home_dir()
-            .ok_or_else(|| Error::Config("Cannot find home directory".to_string()))?;
-        Ok(home.join("Library/Application Support/pick-up-sound-text/config.json"))
+    pub fn config_path(data_dir: &Path) -> Result<PathBuf> {
+        Ok(data_dir.join("config.json"))
     }
 
-    pub fn load() -> Result<Self> {
-        let path = Self::config_path()?;
+    pub fn load(data_dir: &Path) -> Result<Self> {
+        let path = Self::config_path(data_dir)?;
         if !path.exists() {
             return Ok(Self::default());
         }
@@ -94,25 +92,25 @@ impl AppConfig {
         }
 
         // Decrypt API keys
-        let keystore = keystore::KeyStore::new()?;
+        let keystore = keystore::KeyStore::new(data_dir)?;
         if !config.asr.api_key.is_empty() {
             config.asr.api_key = keystore.decrypt(&config.asr.api_key)?;
         }
         if !config.translate.api_key.is_empty() {
             config.translate.api_key = keystore.decrypt(&config.translate.api_key)?;
         }
-        
+
         Ok(config)
     }
 
-    pub fn save(&self) -> Result<()> {
-        let path = Self::config_path()?;
+    pub fn save(&self, data_dir: &Path) -> Result<()> {
+        let path = Self::config_path(data_dir)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        
+
         // Encrypt API keys before saving
-        let keystore = keystore::KeyStore::new()?;
+        let keystore = keystore::KeyStore::new(data_dir)?;
         let mut config = self.clone();
         if !config.asr.api_key.is_empty() {
             config.asr.api_key = keystore.encrypt(&config.asr.api_key)?;
@@ -123,7 +121,7 @@ impl AppConfig {
         
         let content = serde_json::to_string_pretty(&config)?;
         std::fs::write(&path, content)?;
-        
+
         // Set permissions to 0600 (owner read/write only)
         #[cfg(unix)]
         {
@@ -132,7 +130,81 @@ impl AppConfig {
             perms.set_mode(0o600);
             std::fs::set_permissions(&path, perms)?;
         }
-        
+
         Ok(())
+    }
+}
+
+/// 2026-09 前的旧数据目录（仅 mac 存量用户有）
+pub fn legacy_config_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| {
+        h.join("Library/Application Support/pick-up-sound-text")
+    })
+}
+
+/// 旧目录 → app_data_dir 一次性迁移（config.json + salt）。
+/// 必须先于任何 KeyStore::new(data_dir) 调用，否则新盐生成后旧密文不可解
+pub fn migrate_legacy_config(legacy_dir: &Path, data_dir: &Path) -> Result<()> {
+    let new_config = data_dir.join("config.json");
+    if new_config.exists() {
+        return Ok(());
+    }
+    for file in ["config.json", "salt"] {
+        let src = legacy_dir.join(file);
+        if src.exists() {
+            std::fs::create_dir_all(data_dir)?;
+            std::fs::copy(&src, &data_dir.join(file)).map_err(|e| {
+                Error::Config(format!("迁移 {file} 失败: {e}"))
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrate_copies_config_and_salt_when_new_dir_empty() {
+        let legacy = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        std::fs::write(legacy.path().join("config.json"), b"{}").unwrap();
+        std::fs::write(legacy.path().join("salt"), b"salt-bytes").unwrap();
+
+        migrate_legacy_config(legacy.path(), data.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(data.path().join("config.json")).unwrap(),
+            "{}"
+        );
+        assert_eq!(
+            std::fs::read(data.path().join("salt")).unwrap(),
+            b"salt-bytes"
+        );
+    }
+
+    #[test]
+    fn migrate_noop_when_target_has_config() {
+        let legacy = tempfile::tempdir().unwrap();
+        let data = tempfile::tempdir().unwrap();
+        std::fs::write(legacy.path().join("config.json"), b"old").unwrap();
+        std::fs::write(data.path().join("config.json"), b"new").unwrap();
+
+        migrate_legacy_config(legacy.path(), data.path()).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(data.path().join("config.json")).unwrap(),
+            "new"
+        );
+    }
+
+    #[test]
+    fn migrate_noop_when_legacy_missing() {
+        let legacy = tempfile::tempdir().unwrap(); // 空目录
+        let data = tempfile::tempdir().unwrap();
+        migrate_legacy_config(legacy.path(), data.path()).unwrap();
+        assert!(!data.path().join("config.json").exists());
+        assert!(!data.path().join("salt").exists());
     }
 }

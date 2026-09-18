@@ -62,6 +62,9 @@ pub struct AppState {
     pub pipeline_entries: Arc<Mutex<Option<Arc<Mutex<Vec<SubtitleEntry>>>>>>,
     pub processing_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     pub config: Arc<Mutex<AppConfig>>,
+    /// 应用数据目录（config.json/salt 所在；main setup 时注入，
+    /// save_config 等命令经它定位存储位置）
+    pub data_dir: PathBuf,
     pub pipeline: Arc<Mutex<Option<FilePipeline>>>,
     pub pipeline_progress: Arc<Mutex<Option<Arc<Mutex<f64>>>>>,
     pub pipeline_phase: Arc<Mutex<Option<Arc<Mutex<pick_up_sound_text::pipeline::Phase>>>>>,
@@ -114,7 +117,7 @@ pub async fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String>
 pub async fn save_config(config: AppConfig, state: State<'_, AppState>) -> Result<(), String> {
     let mut config_guard = state.config.lock().await;
     *config_guard = config.clone();
-    config.save().map_err(|e| e.to_string())?;
+    config.save(&state.data_dir).map_err(|e| e.to_string())?;
     Ok(())
 }
 

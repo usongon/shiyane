@@ -6,7 +6,6 @@ use commands::{
     stop_file_processing, test_asr_connection, test_translate_connection, AppState,
     RealtimeSessionInner,
 };
-use pick_up_sound_text::config::AppConfig;
 use std::sync::Arc;
 use tauri::menu::{Menu, SubmenuBuilder};
 use tauri::{Emitter, Manager};
@@ -55,33 +54,53 @@ fn main() {
         )
         .init();
 
-    let config = AppConfig::load().unwrap_or_default();
-
-    let app_state = AppState {
-        pipeline_state: Arc::new(Mutex::new(None)),
-        pipeline_entries: Arc::new(Mutex::new(None)),
-        processing_task: Arc::new(Mutex::new(None)),
-        config: Arc::new(Mutex::new(config)),
-        pipeline: Arc::new(Mutex::new(None)),
-        pipeline_progress: Arc::new(Mutex::new(None)),
-        pipeline_phase: Arc::new(Mutex::new(None)),
-        cancel_token: Arc::new(Mutex::new(None)),
-        running_video_path: Arc::new(Mutex::new(None)),
-        running_task_id: Arc::new(Mutex::new(None)),
-        control: Arc::new(Mutex::new(())),
-        realtime: Arc::new(Mutex::new(RealtimeSessionInner {
-            pipeline: None,
-            session_task: None,
-            cancel_token: None,
-            session_id: None,
-            state: pick_up_sound_text::pipeline::realtime::RealtimeState::Idle,
-            last_error: None,
-        })),
-    };
-
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(app_state)
+        .setup(|app| {
+            use tauri::Manager;
+            // setup 错误类型以 Tauri 签名为准：Box<dyn std::error::Error>
+            let data_dir = app.path().app_data_dir().map_err(
+                |e| -> Box<dyn std::error::Error> { format!("获取应用数据目录失败: {e}").into() },
+            )?;
+            std::fs::create_dir_all(&data_dir).map_err(
+                |e| -> Box<dyn std::error::Error> { format!("创建应用数据目录失败: {e}").into() },
+            )?;
+            // 先迁移（旧 mac 数据），再加载——顺序不可反：迁移必须先于任何
+            // KeyStore::new(data_dir)，否则新位置先生成新盐，旧密文永不可解
+            if let Some(legacy) = pick_up_sound_text::config::legacy_config_dir() {
+                if let Err(e) =
+                    pick_up_sound_text::config::migrate_legacy_config(&legacy, &data_dir)
+                {
+                    tracing::warn!("旧配置迁移失败（不影响启动）: {e}");
+                }
+            }
+            let config = pick_up_sound_text::config::AppConfig::load(&data_dir).unwrap_or_default();
+
+            let app_state = AppState {
+                pipeline_state: Arc::new(Mutex::new(None)),
+                pipeline_entries: Arc::new(Mutex::new(None)),
+                processing_task: Arc::new(Mutex::new(None)),
+                config: Arc::new(Mutex::new(config)),
+                data_dir,
+                pipeline: Arc::new(Mutex::new(None)),
+                pipeline_progress: Arc::new(Mutex::new(None)),
+                pipeline_phase: Arc::new(Mutex::new(None)),
+                cancel_token: Arc::new(Mutex::new(None)),
+                running_video_path: Arc::new(Mutex::new(None)),
+                running_task_id: Arc::new(Mutex::new(None)),
+                control: Arc::new(Mutex::new(())),
+                realtime: Arc::new(Mutex::new(RealtimeSessionInner {
+                    pipeline: None,
+                    session_task: None,
+                    cancel_token: None,
+                    session_id: None,
+                    state: pick_up_sound_text::pipeline::realtime::RealtimeState::Idle,
+                    last_error: None,
+                })),
+            };
+            app.manage(app_state);
+            Ok(())
+        })
         .menu(|handle| app_menu(handle))
         .on_menu_event(|app, event| {
             if event.id().0 == "about" {
