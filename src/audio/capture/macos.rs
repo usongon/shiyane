@@ -1,15 +1,12 @@
 use super::{CaptureKind, CaptureSource, CaptureTarget};
+use super::{f32_to_i16, group_pids_by_name, i16_to_f32, resample_to_target, TARGET_SAMPLE_RATE};
 use crate::audio::AudioChunk;
 use crate::{Error, Result};
 use async_trait::async_trait;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use rubato::Resampler;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-
-/// 目标采样率：16kHz mono i16
-const TARGET_SAMPLE_RATE: u32 = 16000;
 
 /// 内部持有的活跃 stream 句柄，用于 stop() 时停止
 enum ActiveStream {
@@ -36,104 +33,6 @@ impl MacOSCaptureSource {
             streams: Vec::new(),
             content_time_counter: Arc::new(AtomicI64::new(0)),
         }
-    }
-
-    /// 将 f32 样本转为 i16
-    fn f32_to_i16(sample: f32) -> i16 {
-        (sample.clamp(-1.0, 1.0) * i16::MAX as f32) as i16
-    }
-
-    /// 将 i16 样本转为 f32
-    fn i16_to_f32(sample: i16) -> f32 {
-        sample as f32 / i16::MAX as f32
-    }
-
-    /// 重采样 f32 数据到 16kHz mono，输出 i16
-    fn resample_to_target(
-        samples: &[f32],
-        source_rate: u32,
-        resampler: &mut Option<rubato::Async<f32>>,
-    ) -> Vec<i16> {
-        if source_rate == TARGET_SAMPLE_RATE {
-            // 无需重采样，直接转换
-            return samples.iter().map(|&s| Self::f32_to_i16(s)).collect();
-        }
-
-        // 初始化重采样器（lazy）
-        if resampler.is_none() {
-            let params = rubato::SincInterpolationParameters {
-                sinc_len: 256,
-                f_cutoff: Some(0.95),
-                oversampling_factor: 128,
-                interpolation: rubato::SincInterpolationType::Cubic,
-                window: rubato::WindowFunction::BlackmanHarris2,
-            };
-            match rubato::Async::new_sinc(
-                TARGET_SAMPLE_RATE as f64 / source_rate as f64,
-                2.0,
-                &params,
-                samples.len().max(1024),
-                1,
-                rubato::FixedAsync::Input,
-            ) {
-                Ok(r) => *resampler = Some(r),
-                Err(e) => {
-                    tracing::error!("Failed to create resampler: {}", e);
-                    return Vec::new();
-                }
-            }
-        }
-
-        let resampler = resampler.as_mut().unwrap();
-
-        // rubato 需要固定 chunk size 输入
-        let chunk_size = resampler.input_frames_next();
-        let mut output = Vec::new();
-
-        for chunk in samples.chunks(chunk_size) {
-            let input = rubato::audioadapter_buffers::direct::InterleavedSlice::new(
-                chunk,
-                1,
-                chunk.len(),
-            );
-            let Ok(input) = input else {
-                tracing::warn!("Failed to create input adapter");
-                continue;
-            };
-
-            if chunk.len() < chunk_size {
-                // 最后一个不完整的 chunk，用 partial_len 处理
-                match resampler.process(
-                    &input,
-                    Some(&rubato::Indexing {
-                        input_offset: 0,
-                        output_offset: 0,
-                        partial_len: Some(chunk.len()),
-                        active_channels_mask: None,
-                    }),
-                ) {
-                    Ok(result) => {
-                        let data = result.take_data();
-                        output.extend(data.iter().map(|&s| Self::f32_to_i16(s)));
-                    }
-                    Err(e) => {
-                        tracing::warn!("Resample error: {}", e);
-                    }
-                }
-            } else {
-                match resampler.process(&input, None) {
-                    Ok(result) => {
-                        let data = result.take_data();
-                        output.extend(data.iter().map(|&s| Self::f32_to_i16(s)));
-                    }
-                    Err(e) => {
-                        tracing::warn!("Resample error: {}", e);
-                    }
-                }
-            }
-        }
-
-        output
     }
 
     /// 启动系统音频采集（ScreenCaptureKit）
@@ -237,7 +136,7 @@ impl MacOSCaptureSource {
             }
 
             // 转换为 i16（配置已设为 16kHz mono，无需重采样）
-            let pcm: Vec<i16> = pcm_data.iter().map(|&s| Self::f32_to_i16(s)).collect();
+            let pcm: Vec<i16> = pcm_data.iter().map(|&s| f32_to_i16(s)).collect();
 
             let content_time = content_time_counter.fetch_add(pcm.len() as i64, Ordering::SeqCst);
             let wall_time = chrono::Utc::now().timestamp_millis();
@@ -315,7 +214,7 @@ impl MacOSCaptureSource {
                         move |data: &[i16], _: &cpal::InputCallbackInfo| {
                             // 转为 f32，重采样，再转回 i16
                             let f32_data: Vec<f32> =
-                                data.iter().map(|&s| Self::i16_to_f32(s)).collect();
+                                data.iter().map(|&s| i16_to_f32(s)).collect();
 
                             // 多声道转单声道
                             let mono: Vec<f32> = if channels > 1 {
@@ -329,7 +228,7 @@ impl MacOSCaptureSource {
 
                             let mut resampler_guard = resampler_clone.lock().unwrap();
                             let pcm =
-                                Self::resample_to_target(&mono, sample_rate, &mut *resampler_guard);
+                                resample_to_target(&mono, sample_rate, &mut *resampler_guard);
                             drop(resampler_guard);
 
                             if pcm.is_empty() {
@@ -375,7 +274,7 @@ impl MacOSCaptureSource {
 
                             let mut resampler_guard = resampler_clone.lock().unwrap();
                             let pcm =
-                                Self::resample_to_target(&mono, sample_rate, &mut *resampler_guard);
+                                resample_to_target(&mono, sample_rate, &mut *resampler_guard);
                             drop(resampler_guard);
 
                             if pcm.is_empty() {
@@ -601,21 +500,9 @@ fn is_noise_process(name: &str, bundle_id: &str, pid: i32, own_pid: i32) -> bool
     !APPLE_AUDIO_APPS.iter().any(|b| bundle_lower.starts_with(b))
 }
 
-/// 按显示名分组 pid，保持首次出现顺序
-fn group_pids_by_name(apps: Vec<(String, i32)>) -> Vec<(String, Vec<i32>)> {
-    let mut groups: Vec<(String, Vec<i32>)> = Vec::new();
-    for (name, pid) in apps {
-        match groups.iter_mut().find(|(n, _)| *n == name) {
-            Some((_, pids)) => pids.push(pid),
-            None => groups.push((name, vec![pid])),
-        }
-    }
-    groups
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{group_pids_by_name, is_noise_process};
+    use super::is_noise_process;
 
     const OWN_PID: i32 = 42;
 
@@ -658,18 +545,5 @@ mod tests {
     fn keeps_third_party_apps() {
         assert!(!is_noise_process("微信", "com.tencent.xinWeChat", 15, OWN_PID));
         assert!(!is_noise_process("Google Chrome", "com.google.Chrome", 16, OWN_PID));
-    }
-
-    #[test]
-    fn merges_same_name_pids() {
-        let groups = group_pids_by_name(vec![
-            ("微信".to_string(), 2120),
-            ("Chrome".to_string(), 300),
-            ("微信".to_string(), 10804),
-            ("微信".to_string(), 10802),
-        ]);
-        assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0], ("微信".to_string(), vec![2120, 10804, 10802]));
-        assert_eq!(groups[1], ("Chrome".to_string(), vec![300]));
     }
 }
