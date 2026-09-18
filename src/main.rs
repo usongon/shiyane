@@ -8,8 +8,44 @@ use commands::{
 };
 use pick_up_sound_text::config::AppConfig;
 use std::sync::Arc;
-use tauri::Manager;
+use tauri::menu::{Menu, SubmenuBuilder};
+use tauri::{Emitter, Manager};
 use tokio::sync::Mutex;
+
+/// 原生菜单栏。「关于拾言」走自定义菜单项发事件给前端弹 About——
+/// 原生 About 面板在 macOS 只显示版本/版权，放不下 GitHub/邮箱等署名信息
+fn app_menu(handle: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let app_submenu = SubmenuBuilder::new(handle, "拾言")
+        .text("about", "关于拾言")
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .quit()
+        .build()?;
+
+    let edit_submenu = SubmenuBuilder::new(handle, "编辑")
+        .undo()
+        .redo()
+        .separator()
+        .cut()
+        .copy()
+        .paste()
+        .select_all()
+        .build()?;
+
+    let window_submenu = SubmenuBuilder::new(handle, "窗口")
+        .minimize()
+        .maximize()
+        .separator()
+        .close_window()
+        .build()?;
+
+    Menu::with_items(handle, &[&app_submenu, &edit_submenu, &window_submenu])
+}
 
 fn main() {
     tracing_subscriber::fmt()
@@ -46,6 +82,14 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(app_state)
+        .menu(|handle| app_menu(handle))
+        .on_menu_event(|app, event| {
+            if event.id().0 == "about" {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.emit("open-about", ());
+                }
+            }
+        })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // 只处理主窗口
