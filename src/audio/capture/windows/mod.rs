@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 
 pub(crate) mod convert;
 pub(crate) mod device;
+pub(crate) mod process;
 pub(crate) mod session;
 
 pub struct WindowsCaptureSource;
