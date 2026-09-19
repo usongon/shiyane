@@ -1,3 +1,7 @@
+// Windows 发布版隐藏控制台窗口（否则双击启动会挂一个日志黑窗）；
+// debug 构建保留控制台便于看 tracing 输出
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod commands;
 
 use commands::{
