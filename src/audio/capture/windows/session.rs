@@ -3,8 +3,8 @@ use crate::{Error, Result};
 use windows::core::{Interface, HSTRING, PWSTR};
 use windows::Win32::Foundation::CloseHandle;
 use windows::Win32::Media::Audio::{
-    eConsole, eRender, IAudioSessionControl, IAudioSessionControl2, IAudioSessionEnumerator,
-    IAudioSessionManager2, IMMDeviceEnumerator, MMDeviceEnumerator,
+    AudioSessionStateActive, eConsole, eRender, IAudioSessionControl, IAudioSessionControl2,
+    IAudioSessionEnumerator, IAudioSessionManager2, IMMDeviceEnumerator, MMDeviceEnumerator,
 };
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
 use windows::Win32::System::Threading::{
@@ -54,6 +54,7 @@ pub(crate) fn enumerate_audio_sessions() -> Result<Vec<(u32, String)>> {
         .map_err(|e| Error::AudioSource(format!("GetSessionCount failed: {e}")))?;
 
     let mut sessions = Vec::new();
+    let mut inactive = 0u32;
     for i in 0..count {
         let control: IAudioSessionControl = match unsafe { session_enum.GetSession(i) } {
             Ok(c) => c,
@@ -67,19 +68,30 @@ pub(crate) fn enumerate_audio_sessions() -> Result<Vec<(u32, String)>> {
             continue;
         };
 
-        // 5. GetProcessId() → pid；pid == 0（系统会话）跳过
+        // 5. GetState()：只保留活动会话（Win11 大量 GUI 应用启动即建非活动会话，
+        //    不过滤会淹没音源列表）；活动判定后续按真机表现校准
+        let state = unsafe { control2.GetState() }.unwrap_or_default();
+        if state != AudioSessionStateActive {
+            inactive += 1;
+            continue;
+        }
+
+        // 6. GetProcessId() → pid；pid == 0（系统会话）跳过
         let pid = unsafe { control2.GetProcessId() }.unwrap_or(0);
         if pid == 0 {
             continue;
         }
 
-        // 6. OpenProcess + QueryFullProcessImageNameW → 完整路径取文件名
+        // 7. OpenProcess + QueryFullProcessImageNameW → 完整路径取文件名
         match process_exe_name(pid) {
             Some(exe_name) => sessions.push((pid, exe_name)),
             None => tracing::warn!("无法获取进程 {} 的可执行名，跳过", pid),
         }
     }
+    if inactive > 0 {
+        tracing::debug!("已隐藏 {} 个无音频活动的会话", inactive);
+    }
 
-    // 7. 收集 (pid, exe_name)；结构性错误已在上方 map_err 成 Error::AudioSource
+    // 8. 收集 (pid, exe_name)；结构性错误已在上方 map_err 成 Error::AudioSource
     Ok(sessions)
 }

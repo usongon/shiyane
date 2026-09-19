@@ -88,7 +88,15 @@ fn main() {
                     tracing::warn!("旧配置迁移失败（不影响启动）: {e}");
                 }
             }
-            let config = pick_up_sound_text::config::AppConfig::load(&data_dir).unwrap_or_default();
+            let config = match pick_up_sound_text::config::AppConfig::load(&data_dir) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(
+                        "配置加载失败，使用默认配置（若此前已保存密钥，密文可能无法解密）: {e}"
+                    );
+                    Default::default()
+                }
+            };
 
             let app_state = AppState {
                 pipeline_state: Arc::new(Mutex::new(None)),

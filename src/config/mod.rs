@@ -149,7 +149,9 @@ pub fn migrate_legacy_config(legacy_dir: &Path, data_dir: &Path) -> Result<()> {
     if new_config.exists() {
         return Ok(());
     }
-    for file in ["config.json", "salt"] {
+    // salt 先拷、config.json 后拷：若 config.json 拷贝失败，下次启动因新目录
+    // 无 config.json 仍会重试整个迁移；反之 config 在而 salt 丢失会让旧密文永久不可解
+    for file in ["salt", "config.json"] {
         let src = legacy_dir.join(file);
         if src.exists() {
             std::fs::create_dir_all(data_dir)?;
