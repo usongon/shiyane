@@ -34,7 +34,13 @@
 
 ### macOS
 
-从 [Releases](https://github.com/usongon/shiyane/releases) 下载 `.dmg`，拖入 Applications 即可使用。ffmpeg/ffprobe 已内置，无需安装任何命令行工具。
+从 [Releases](https://github.com/usongon/shiyane/releases) 下载 `.dmg`，拖入 Applications。ffmpeg/ffprobe 已内置，无需安装任何命令行工具。
+
+安装包未做开发者签名，macOS 会给网络下载的应用加隔离标记，首次打开可能提示「已损坏」——文件本身完好。在终端执行一次即可正常打开（只需一次，之后永久生效）：
+
+```bash
+xattr -cr /Applications/Shiyane.app
+```
 
 ### Windows
 
