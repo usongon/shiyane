@@ -291,7 +291,7 @@ export default function RealtimePage({ active }: { active: boolean }) {
               <span className="realtime-status-text">{STATUS_TEXT[state]}</span>
             </div>
             <div className="realtime-actions">
-              <Tooltip title={overlayOn ? "收起悬浮字幕" : "悬浮字幕（置顶歌词条）"}>
+              <Tooltip title={overlayOn ? "收起悬浮字幕" : "悬浮字幕（置顶悬浮字幕条）"}>
                 <Button
                   type={overlayOn ? "primary" : "default"}
                   shape="circle"
