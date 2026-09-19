@@ -142,11 +142,13 @@ export default function App() {
             )}
 
             <div className="app-body">
-              {/* 两个主视图常驻挂载，保留状态；拖拽监听不因切页而丢失 */}
-              <div style={{ display: view === "file" ? "flex" : "none", flex: 1, minHeight: 0 }}>
+              {/* 两个主视图常驻挂载，保留状态；拖拽监听不因切页而丢失。
+                  minWidth:0 必须有：flex 项默认 min-width:auto，长文件名
+                  nowrap min-content 会把 wrapper 撑出窗口（按钮被挤出可视区） */}
+              <div style={{ display: view === "file" ? "flex" : "none", flex: 1, minWidth: 0, minHeight: 0 }}>
                 <FilePage active={view === "file"} />
               </div>
-              <div style={{ display: view === "realtime" ? "flex" : "none", flex: 1, minHeight: 0 }}>
+              <div style={{ display: view === "realtime" ? "flex" : "none", flex: 1, minWidth: 0, minHeight: 0 }}>
                 <RealtimePage active={view === "realtime"} />
               </div>
             </div>
@@ -173,7 +175,12 @@ export default function App() {
               </div>
             </div>
 
-            <SettingsDrawer open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+            {/* Windows 无菜单栏，About 入口放设置抽屉；macOS 走原生菜单 */}
+            <SettingsDrawer
+              open={settingsOpen}
+              onClose={() => setSettingsOpen(false)}
+              onAbout={platform === "windows" ? () => setAboutOpen(true) : undefined}
+            />
             <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} />
           </div>
         </AntdApp>

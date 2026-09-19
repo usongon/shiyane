@@ -167,6 +167,9 @@ body {
 .view {
   flex: 1;
   min-height: 0;
+  /* flex 项默认 min-width:auto 会随内容 min-content 撑破窗口（长文件名曾把
+     开始按钮挤出窗口），所有视图容器统一放行收缩 */
+  min-width: 0;
   display: flex;
   flex-direction: column;
   padding: 16px 18px 18px;
