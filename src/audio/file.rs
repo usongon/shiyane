@@ -71,6 +71,17 @@ fn tool_spawn_error(tool: &str, e: std::io::Error) -> Error {
     }
 }
 
+/// 统一的 ffmpeg/ffprobe 子进程入口。Windows 下必须 CREATE_NO_WINDOW：
+/// 这些工具是控制台程序，GUI 应用直接 spawn 时系统会新分配控制台，
+/// 表现为开始转字幕瞬间闪一个黑窗（真机 B4 验收发现）
+fn tool_command(tool: &str) -> Command {
+    let mut cmd = Command::new(resolve_tool(tool));
+    cmd.kill_on_drop(true);
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    cmd
+}
+
 /// Audio source that extracts audio from a video file using ffmpeg.
 ///
 /// Segments the file into 10-minute chunks with 5-second overlap.
@@ -103,8 +114,7 @@ impl FileAudioSource {
             .to_str()
             .ok_or_else(|| Error::AudioSource("Path contains invalid UTF-8".to_string()))?;
 
-        let output = Command::new(resolve_tool("ffprobe"))
-            .kill_on_drop(true)
+        let output = tool_command("ffprobe")
             .args(&[
                 "-v",
                 "error",
@@ -140,8 +150,7 @@ impl FileAudioSource {
             .to_str()
             .ok_or_else(|| Error::AudioSource("Path contains invalid UTF-8".to_string()))?;
 
-        let output = Command::new(resolve_tool("ffmpeg"))
-            .kill_on_drop(true)
+        let output = tool_command("ffmpeg")
             .args(&[
                 "-ss",
                 &format!("{:.3}", start.as_secs_f64()),
@@ -237,8 +246,7 @@ impl AudioSource for FileAudioSource {
         // Create temp file path（确定性命名：暂停遗留的半截文件被 -y 覆盖）
         let temp_file = temp_wav_path(&self.video_path);
 
-        let output = Command::new(resolve_tool("ffmpeg"))
-            .kill_on_drop(true)
+        let output = tool_command("ffmpeg")
             .args(&[
                 "-i",
                 path_str,
