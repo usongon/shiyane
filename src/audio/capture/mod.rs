@@ -37,11 +37,31 @@ pub(crate) fn mixdown_interleaved(samples: &[f32], channels: u16) -> Vec<f32> {
         .collect()
 }
 
-/// 重采样 f32 数据到 16kHz mono，输出 i16
+/// 重采样持久状态：FixedIn 采样器 + 跨调用输入累积缓冲
+pub(crate) struct ResamplerState {
+    resampler: Option<rubato::Async<f32>>,
+    pending: Vec<f32>,
+}
+
+impl Default for ResamplerState {
+    fn default() -> Self {
+        Self {
+            resampler: None,
+            pending: Vec::new(),
+        }
+    }
+}
+
+/// 重采样 f32 数据到 16kHz mono，输出 i16。
+/// rubato FixedIn 只接受整块 chunk_size 输入（partial 仅流末尾一次合法）；
+/// Windows 事件驱动采集每 ~10ms 到 480 样本（远小于 1024），逐包以 partial
+/// 输入调用会产出 2.13 倍样本量的坏数据（真机实测：5s 窗口 170666 样本、
+/// 有效采样率 34kHz）。故跨调用累积输入，凑满整块才 process；残留
+/// ≤ chunk_size 输入样本留待下次（流末尾最多丢 ~21ms，字幕场景可忽略）。
 pub(crate) fn resample_to_target(
     samples: &[f32],
     source_rate: u32,
-    resampler: &mut Option<rubato::Async<f32>>,
+    state: &mut ResamplerState,
 ) -> Vec<i16> {
     if source_rate == TARGET_SAMPLE_RATE {
         // 无需重采样，直接转换
@@ -49,7 +69,7 @@ pub(crate) fn resample_to_target(
     }
 
     // 初始化重采样器（lazy）
-    if resampler.is_none() {
+    if state.resampler.is_none() {
         let params = rubato::SincInterpolationParameters {
             sinc_len: 256,
             f_cutoff: Some(0.95),
@@ -61,11 +81,11 @@ pub(crate) fn resample_to_target(
             TARGET_SAMPLE_RATE as f64 / source_rate as f64,
             2.0,
             &params,
-            samples.len().max(1024),
+            1024,
             1,
             rubato::FixedAsync::Input,
         ) {
-            Ok(r) => *resampler = Some(r),
+            Ok(r) => state.resampler = Some(r),
             Err(e) => {
                 tracing::error!("Failed to create resampler: {}", e);
                 return Vec::new();
@@ -73,51 +93,28 @@ pub(crate) fn resample_to_target(
         }
     }
 
+    let ResamplerState { resampler, pending } = state;
     let resampler = resampler.as_mut().unwrap();
-
-    // rubato 需要固定 chunk size 输入
     let chunk_size = resampler.input_frames_next();
-    let mut output = Vec::new();
 
-    for chunk in samples.chunks(chunk_size) {
-        let input = rubato::audioadapter_buffers::direct::InterleavedSlice::new(
-            chunk,
-            1,
-            chunk.len(),
-        );
+    // 累积本次输入，凑满整块才喂 FixedIn
+    pending.extend_from_slice(samples);
+    let mut output = Vec::new();
+    while pending.len() >= chunk_size {
+        let rest = pending.split_off(chunk_size);
+        let chunk = std::mem::replace(pending, rest);
+        let input = rubato::audioadapter_buffers::direct::InterleavedSlice::new(&chunk, 1, chunk.len());
         let Ok(input) = input else {
             tracing::warn!("Failed to create input adapter");
             continue;
         };
-
-        if chunk.len() < chunk_size {
-            // 最后一个不完整的 chunk，用 partial_len 处理
-            match resampler.process(
-                &input,
-                Some(&rubato::Indexing {
-                    input_offset: 0,
-                    output_offset: 0,
-                    partial_len: Some(chunk.len()),
-                    active_channels_mask: None,
-                }),
-            ) {
-                Ok(result) => {
-                    let data = result.take_data();
-                    output.extend(data.iter().map(|&s| f32_to_i16(s)));
-                }
-                Err(e) => {
-                    tracing::warn!("Resample error: {}", e);
-                }
+        match resampler.process(&input, None) {
+            Ok(result) => {
+                let data = result.take_data();
+                output.extend(data.iter().map(|&s| f32_to_i16(s)));
             }
-        } else {
-            match resampler.process(&input, None) {
-                Ok(result) => {
-                    let data = result.take_data();
-                    output.extend(data.iter().map(|&s| f32_to_i16(s)));
-                }
-                Err(e) => {
-                    tracing::warn!("Resample error: {}", e);
-                }
+            Err(e) => {
+                tracing::warn!("Resample error: {}", e);
             }
         }
     }

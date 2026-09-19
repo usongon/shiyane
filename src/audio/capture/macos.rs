@@ -1,5 +1,8 @@
 use super::{CaptureKind, CaptureSource, CaptureTarget};
-use super::{f32_to_i16, group_pids_by_name, i16_to_f32, resample_to_target, TARGET_SAMPLE_RATE};
+use super::{
+    f32_to_i16, group_pids_by_name, i16_to_f32, resample_to_target, ResamplerState,
+    TARGET_SAMPLE_RATE,
+};
 use crate::audio::AudioChunk;
 use crate::{Error, Result};
 use async_trait::async_trait;
@@ -202,7 +205,7 @@ impl MacOSCaptureSource {
         let content_time_counter = self.content_time_counter.clone();
 
         // 用于重采样的状态（在回调中共享）
-        let resampler_state: Arc<Mutex<Option<rubato::Async<f32>>>> = Arc::new(Mutex::new(None));
+        let resampler_state: Arc<Mutex<ResamplerState>> = Arc::new(Mutex::new(Default::default()));
 
         let stream = match sample_format {
             cpal::SampleFormat::I16 => {

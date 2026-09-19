@@ -371,7 +371,7 @@ fn run_event_capture_loop(
     tx: &mpsc::Sender<AudioChunk>,
     counter: &AtomicI64,
 ) {
-    let mut resampler: Option<rubato::Async<f32>> = None;
+    let mut resampler = super::super::ResamplerState::default();
     loop {
         // 等待缓冲数据事件，200ms 超时兜底轮询 stop
         unsafe { WaitForSingleObject(event.0, 200) };
