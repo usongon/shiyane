@@ -61,6 +61,8 @@ pub struct FilePipeline {
     entries: Arc<Mutex<Vec<SubtitleEntry>>>,
     config: AppConfig,
     source_language: String,
+    /// 任务级「区分说话人」开关：透传给 filetrans；开启时时长上限收紧为 2h
+    diarization: bool,
     checkpoint: Option<Checkpoint>,
     checkpoint_path: Option<PathBuf>,
     /// 本次运行期望的配置指纹（init 时注入；生产中由当前 config 构建，
@@ -79,6 +81,7 @@ impl FilePipeline {
         translate_provider: Box<dyn TranslateProvider>,
         config: AppConfig,
         source_language: String,
+        diarization: bool,
     ) -> Self {
         Self {
             state: Arc::new(Mutex::new(PipelineState::Idle)),
@@ -88,6 +91,7 @@ impl FilePipeline {
             entries: Arc::new(Mutex::new(Vec::new())),
             config,
             source_language,
+            diarization,
             checkpoint: None,
             checkpoint_path: None,
             current_fingerprint: None,
@@ -165,13 +169,19 @@ impl FilePipeline {
         *phase = Phase::Extracting;
         drop(phase);
 
-        // Duration limit: min(upstream transcription limit, 3h)
-        const MAX_DURATION_SECS: f64 = 3.0 * 3600.0;
+        // Duration limit: min(upstream transcription limit, 3h)；开启说话人分离时
+        // 收紧为官方建议上限 2h（超长可能导致识别失败或超时）
+        let (max_duration_secs, hint) = if self.diarization {
+            (2.0 * 3600.0, "开启区分说话人后最长 2 小时，请关闭该选项或先裁剪")
+        } else {
+            (3.0 * 3600.0, "最长 3 小时，请先裁剪后再处理")
+        };
         if let Some(total) = self.audio_source.total_duration() {
-            if total.as_secs_f64() > MAX_DURATION_SECS {
+            if total.as_secs_f64() > max_duration_secs {
                 let msg = format!(
-                    "视频时长 {:.1} 小时超过限制（最长 3 小时），请先裁剪后再处理",
-                    total.as_secs_f64() / 3600.0
+                    "视频时长 {:.1} 小时超过限制（{}）",
+                    total.as_secs_f64() / 3600.0,
+                    hint
                 );
                 let mut state = self.state.lock().await;
                 *state = PipelineState::Failed(msg.clone());
@@ -191,11 +201,13 @@ impl FilePipeline {
                     translate_provider: self.config.translate.provider.clone(),
                     translate_model: self.config.translate.model.clone(),
                     asr_model: self.config.asr.file_model.clone(),
+                    diarization: self.diarization,
                 });
         if let (Some(cp), Some(cp_path)) = (&mut self.checkpoint, &self.checkpoint_path.clone()) {
             if !cp.segments.is_empty() && cp.fingerprint != current_fp {
                 let asr_invalid = cp.fingerprint.source_language != current_fp.source_language
-                    || cp.fingerprint.asr_model != current_fp.asr_model;
+                    || cp.fingerprint.asr_model != current_fp.asr_model
+                    || cp.fingerprint.diarization != current_fp.diarization;
                 if asr_invalid {
                     tracing::info!(
                         "源语言/ASR 模型变更（{:?} → {:?}），checkpoint 作废全量重跑",
@@ -289,6 +301,7 @@ impl FilePipeline {
                 api_key: self.config.asr.api_key.clone(),
                 language: self.source_language.clone(),
                 workspace_id: self.config.asr.workspace_id.clone(),
+                diarization: self.diarization,
             };
 
             // Transcribe the complete audio file

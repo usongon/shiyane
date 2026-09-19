@@ -200,6 +200,7 @@ impl RealtimePipeline {
             api_key: self.config.asr.api_key.clone(),
             language: self.source_language.clone(),
             workspace_id: self.config.asr.workspace_id.clone(),
+            diarization: false, // 实时链路不区分说话人
         };
 
         let asr_stream = self.asr_provider.as_ref()

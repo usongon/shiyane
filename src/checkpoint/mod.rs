@@ -38,7 +38,7 @@ pub struct SegmentProgress {
 }
 
 /// 配置指纹：任一字段变化会使对应阶段的缓存结果失效。
-/// - source_language / asr_model 变化 → ASR 结果无效（全量重跑）
+/// - source_language / asr_model / diarization 变化 → ASR 结果无效（全量重跑）
 /// - target_lang / translate_provider / translate_model 变化 → 仅译文无效（重翻）
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct CheckpointFingerprint {
@@ -52,6 +52,9 @@ pub struct CheckpointFingerprint {
     pub translate_model: String,
     #[serde(default)]
     pub asr_model: String,
+    /// 任务级「区分说话人」开关；翻转 = ASR 结果无效（与 source_language/asr_model 同组）
+    #[serde(default)]
+    pub diarization: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

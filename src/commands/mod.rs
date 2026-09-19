@@ -180,6 +180,7 @@ pub async fn start_file_processing(
         Box::new(translate_provider),
         config.clone(),
         source_language.clone(),
+        false, // TODO(Task 4): 接入 diarization 命令参数后改为真值
     );
 
     // Stable task_id（path+size+mtime）：同文件重跑续传，换文件天然隔离
@@ -193,6 +194,7 @@ pub async fn start_file_processing(
         translate_provider: config.translate.provider.clone(),
         translate_model: config.translate.model.clone(),
         asr_model: config.asr.file_model.clone(),
+        diarization: false, // TODO(Task 4): 接入 diarization 命令参数后改为真值
     };
     pipeline
         .init_checkpoint_in(
