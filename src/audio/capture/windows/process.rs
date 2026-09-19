@@ -89,9 +89,14 @@ pub(crate) fn spawn_process_loopback(
         ))
     })?;
 
-    // 1. 激活参数：AUDIOCLIENT_ACTIVATION_PARAMS 装进 VT_BLOB PropVariant
-    //    （pBlobData 指向栈上结构——不可 PropVariantClear，否则会对栈指针 CoTaskMemFree）
-    let mut activation_params: AUDIOCLIENT_ACTIVATION_PARAMS = AUDIOCLIENT_ACTIVATION_PARAMS {
+    // 1. 激活参数：AUDIOCLIENT_ACTIVATION_PARAMS 装进 VT_BLOB PropVariant。
+    //    blob 必须 CoTaskMemAlloc 堆分配且此后不手动释放：真机（Win11 26200）
+    //    实证栈 blob 在激活成功路径会触发系统侧 CoTaskMemFree（对栈指针做堆
+    //    释放 → 0xC0000374 堆损坏，激活完成后即崩）；而失败路径不触碰 blob。
+    //    MSDN 未记载 activateOptions 的所有权契约（官方 C++ 样例用栈，本机不
+    //    成立）。取「分配后移交、永不释放」：单次启动泄漏 ≤ size_of 参数结构，
+    //    用户手动启动采集为低频操作，可忽略；换来杜绝双重释放/UAF。
+    let activation_params: AUDIOCLIENT_ACTIVATION_PARAMS = AUDIOCLIENT_ACTIVATION_PARAMS {
         ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
         Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
             ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
@@ -99,6 +104,20 @@ pub(crate) fn spawn_process_loopback(
                 ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
             },
         },
+    };
+    let blob_data: *mut u8 = unsafe {
+        let p = windows::Win32::System::Com::CoTaskMemAlloc(
+            std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>(),
+        );
+        if p.is_null() {
+            return Err(Error::AudioSource(format!("[{tag}] CoTaskMemAlloc 失败")));
+        }
+        std::ptr::copy_nonoverlapping(
+            &activation_params as *const _ as *const u8,
+            p.cast(),
+            std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>(),
+        );
+        p.cast()
     };
     let propvariant: PROPVARIANT = PROPVARIANT {
         Anonymous: PROPVARIANT_0 {
@@ -110,7 +129,7 @@ pub(crate) fn spawn_process_loopback(
                 Anonymous: PROPVARIANT_0_0_0 {
                     blob: BLOB {
                         cbSize: std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
-                        pBlobData: &mut activation_params as *mut _ as *mut u8,
+                        pBlobData: blob_data,
                     },
                 },
             }),
@@ -122,8 +141,9 @@ pub(crate) fn spawn_process_loopback(
     let handler: IActivateAudioInterfaceCompletionHandler =
         ActivateHandler { done: done.clone() }.into();
 
-    // 3. 异步激活（参数在栈上，须在本次调用返回前保持存活——上二者均在作用域内）
-    unsafe {
+    // 3. 异步激活。返回的 operation 须存活到激活完成（MSDN：Windows 持有
+    //    completionHandler 引用直到 operation 完成且应用释放 operation）
+    let operation = unsafe {
         ActivateAudioInterfaceAsync(
             windows::core::w!("VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK"),
             &IAudioClient::IID,
@@ -142,6 +162,7 @@ pub(crate) fn spawn_process_loopback(
             .unwrap_or_else(|e| e.into_inner());
         guard = g;
         if guard.is_none() {
+            drop(operation);
             return Err(Error::AudioSource(format!(
                 "[{tag}] 激活超时（5s, timed_out={}）",
                 timeout.timed_out()
@@ -163,7 +184,7 @@ pub(crate) fn spawn_process_loopback(
 
     // 5. Initialize(SHARED, LOOPBACK|EVENTCALLBACK, 0, 0) + 采集循环（与 Task 4 完全一致，
     //    sample 参数：两个 duration 均为 0）
-    start_audio_client_stream(
+    let handle = start_audio_client_stream(
         tag,
         audio_client,
         mix_format,
@@ -171,5 +192,7 @@ pub(crate) fn spawn_process_loopback(
         0,
         tx,
         counter,
-    )
+    );
+    drop(operation);
+    handle
 }
