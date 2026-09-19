@@ -14,13 +14,8 @@ output*.srt
 output*.vtt
 
 # Local-only design/plan docs (user request: not for GitHub)
-docs/superpowers/specs/2026-09-15-checkpoint-resume-design.md
-docs/superpowers/plans/2026-09-15-checkpoint-resume-plan.md
-docs/superpowers/specs/2026-09-16-realtime-subtitle-design.md
-docs/superpowers/plans/2026-09-16-realtime-subtitle-plan.md
-docs/superpowers/specs/2026-09-19-windows-support-design.md
-docs/superpowers/plans/2026-09-19-windows-support-plan.md
-docs/superpowers/plans/2026-09-20-windows-machine-runbook.md
+docs/superpowers/
+.superpowers/
 
 # Mobile icon output from `cargo tauri icon` (desktop app doesn't use these)
 icons/ios/
