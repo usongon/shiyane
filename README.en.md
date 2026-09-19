@@ -58,6 +58,15 @@ When building from source without bundling the binaries (see below), install ffm
 - Ubuntu: `sudo apt install ffmpeg`
 - Windows: download from https://ffmpeg.org/download.html
 
+## Windows Install
+
+- System requirements: Windows 11 (x64)
+- Download the `.exe` installer from the releases (NSIS, per-user install, no administrator required)
+- First-run SmartScreen prompt: click "More info" → "Run anyway" (unsigned; see the note below)
+- Known limitation: DRM content and a few apps (e.g. Teams meetings) cannot be captured per-process; choose "System Audio (All)" in that case
+
+> The Windows installer is not code-signed, so SmartScreen shows a warning. This is common for releases by independent developers; you can verify the package against the sha256 checksums published with the release.
+
 ## Build from source
 
 ```bash
@@ -76,6 +85,8 @@ cargo tauri build           # installs frontend deps in src-ui/ and builds it au
 
 Building without running `build-ffmpeg.sh` also works — the app then falls back to an
 ffmpeg found on the system PATH.
+
+Windows builds must run `cargo tauri build` on Windows 11 with VS Build Tools; fetch the ffmpeg sidecar with `scripts/fetch-ffmpeg-windows.sh`.
 
 The built app is in `target/release/bundle/`. Third-party licenses: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
