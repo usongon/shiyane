@@ -179,9 +179,8 @@ impl RealtimePipeline {
 
     /// 连接 ASR 流与音频采集（start 与 resume 共用）。任何一步失败都会把
     /// 内部状态置为 Failed：重启守卫优先读内部状态，若卡在
-    /// Connecting/Reconnecting 会永久拒绝新会话，用户只能重启应用
-    /// （曾为真机 bug：无 API key 启动失败后重配再启动被拒）。
-    /// 不在此发 state-change 事件——命令层对 start/resume 失败已有 emit。
+    /// Connecting/Reconnecting 会永久拒绝新会话，用户只能重启应用。
+    /// 不在此发 state-change 事件——命令层对连接失败已有统一的失败处理。
     pub async fn connect_streams(
         &mut self,
     ) -> Result<(Box<dyn AsrStream>, mpsc::Receiver<AudioChunk>)> {

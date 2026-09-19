@@ -180,9 +180,8 @@ impl AsrProvider for FailingAsrProvider {
 
 #[tokio::test]
 async fn failed_connect_marks_pipeline_failed_not_connecting() {
-    // 真机 bug 回归锁：无 API key 时 start_stream 失败，pipeline 内部状态曾卡
-    // Connecting；重启守卫优先读内部状态，卡 Connecting 会永久拒绝新会话，
-    // 用户只能重启应用（2026-09-19 Windows 真机验收发现）
+    // 回归锁：连接失败时内部状态曾卡 Connecting；重启守卫优先读内部状态，
+    // 卡在中间态会永久拒绝新会话，用户只能重启应用
     let mut pipeline = RealtimePipeline::new(
         Box::new(MockCaptureSource { chunks: vec![] }),
         Box::new(FailingAsrProvider),

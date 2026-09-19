@@ -151,7 +151,13 @@ pub async fn pause_realtime_session(state: State<'_, AppState>) -> Result<(), St
 pub async fn resume_realtime_session(state: State<'_, AppState>) -> Result<(), String> {
     let mut realtime = state.realtime.lock().await;
     if let Some(pipeline) = realtime.pipeline.as_mut() {
-        pipeline.resume().await.map_err(|e| e.to_string())?;
+        if let Err(e) = pipeline.resume().await {
+            // 镜像同步 pipeline 实际终态：连接失败为 Failed（可新建会话），
+            // 前置校验失败仍为 Paused（可重试/停止）；失败原因经 invoke 返回前端
+            realtime.state = pipeline.get_state().await;
+            realtime.last_error = Some(e.to_string());
+            return Err(e.to_string());
+        }
         realtime.state = RealtimeState::Listening;
     }
     Ok(())

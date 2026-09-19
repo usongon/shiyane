@@ -73,7 +73,7 @@ fn tool_spawn_error(tool: &str, e: std::io::Error) -> Error {
 
 /// 统一的 ffmpeg/ffprobe 子进程入口。Windows 下必须 CREATE_NO_WINDOW：
 /// 这些工具是控制台程序，GUI 应用直接 spawn 时系统会新分配控制台，
-/// 表现为开始转字幕瞬间闪一个黑窗（真机 B4 验收发现）
+/// 表现为开始转字幕瞬间闪一个黑窗
 fn tool_command(tool: &str) -> Command {
     let mut cmd = Command::new(resolve_tool(tool));
     cmd.kill_on_drop(true);
