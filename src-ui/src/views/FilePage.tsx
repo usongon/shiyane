@@ -264,6 +264,21 @@ export default function FilePage({ active }: { active: boolean }) {
     await refreshFileStatus();
   };
 
+  const onDiarizationChange = (checked: boolean) => {
+    if (!checked) {
+      setDiarization(false);
+      return;
+    }
+    modal.confirm({
+      title: "说话人区分由 AI 识别",
+      content:
+        "分人与切句由语音大模型自动识别，可能存在分人不准、误切句或漏句的情况（多人语速接近、配乐音效复杂时误差更大）。建议谨慎使用，重要场合请人工复核。",
+      okText: "仍要开启",
+      cancelText: "暂不开启",
+      onOk: () => setDiarization(true),
+    });
+  };
+
   const doPause = async () => {
     if (!taskRunning) return;
     setPausing(true);
@@ -534,7 +549,7 @@ export default function FilePage({ active }: { active: boolean }) {
                 <Switch
                   size="small"
                   checked={diarization}
-                  onChange={setDiarization}
+                  onChange={onDiarizationChange}
                   disabled={taskRunning}
                 />
               </label>
