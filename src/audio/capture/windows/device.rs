@@ -243,7 +243,7 @@ fn spawn_endpoint_stream(
         mix_format,
         stream_flags,
         HNS_100MS,
-        false,
+        true,
         tx,
         counter,
     )
@@ -258,7 +258,7 @@ pub(crate) fn start_audio_client_stream(
     mix_format: MixFormat,
     stream_flags: u32,
     buffer_hns: i64,
-    skip_padding: bool,
+    supports_padding: bool,
     tx: mpsc::Sender<AudioChunk>,
     counter: Arc<AtomicI64>,
 ) -> Result<StreamHandle> {
@@ -319,7 +319,7 @@ pub(crate) fn start_audio_client_stream(
                 tag,
                 channels,
                 source_rate,
-                skip_padding,
+                supports_padding,
                 stop_flag,
                 tx,
                 counter,
@@ -342,7 +342,7 @@ fn capture_thread_main(
     tag: String,
     channels: u16,
     source_rate: u32,
-    skip_padding: bool,
+    supports_padding: bool,
     stop: Arc<AtomicBool>,
     tx: mpsc::Sender<AudioChunk>,
     counter: Arc<AtomicI64>,
@@ -361,7 +361,7 @@ fn capture_thread_main(
         &event,
         channels,
         source_rate,
-        skip_padding,
+        supports_padding,
         &stop,
         &tx,
         &counter,
@@ -380,7 +380,7 @@ fn run_event_capture_loop(
     event: &EventGuard,
     channels: u16,
     source_rate: u32,
-    skip_padding: bool,
+    supports_padding: bool,
     stop: &AtomicBool,
     tx: &mpsc::Sender<AudioChunk>,
     counter: &AtomicI64,
@@ -394,7 +394,7 @@ fn run_event_capture_loop(
         }
         // 进程 loopback 客户端不支持 GetCurrentPadding（真机实测 E_NOTIMPL，
         // 官方样例循环也不查 padding）：事件驱动下事件到即有包，直接 GetBuffer
-        if !skip_padding {
+        if supports_padding {
             let padding = match unsafe { audio_client.GetCurrentPadding() } {
                 Ok(p) => p,
                 Err(e) => {

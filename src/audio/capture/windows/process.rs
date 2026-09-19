@@ -1,12 +1,15 @@
 //! 进程树 loopback 捕获（微软 ApplicationLoopback 官方样例移植）。
 //!
 //! `ActivateAudioInterfaceAsync(VAD\Process_Loopback, IAudioClient, VT_BLOB
-//! 激活参数)` → 完成回调 `GetActivateResult` 取 IAudioClient → `GetMixFormat`
-//! （进程 loopback 不可指定格式）→ `Initialize(SHARED, LOOPBACK|EVENTCALLBACK,
-//! 0, 0, mix_format)` → 复用 Task 4 的 `start_audio_client_stream` 跑
-//! event-driven 采集循环。每个 pid 一条线程（同名合并组由 Task 6 拆成多条 spawn）。
+//! 激活参数)` → 完成回调 `GetActivateResult` 取 IAudioClient → 自备 f32/2ch/48k
+//! 格式（进程 loopback 客户端不支持 GetMixFormat，E_NOTIMPL）→ `Initialize(
+//! SHARED, LOOPBACK|EVENTCALLBACK|AUTOCONVERTPCM, 0, 0, format)` → 复用 Task 4
+//! 的 `start_audio_client_stream` 跑 event-driven 采集循环。每个 pid 一条线程
+//! （同名合并组由 Task 6 拆成多条 spawn）。
 
-use super::device::{start_audio_client_stream, MixFormat, MtaInterface, StreamHandle};
+use super::device::{
+    start_audio_client_stream, MixFormat, MtaInterface, StreamHandle, WAVE_FORMAT_IEEE_FLOAT,
+};
 use super::ComGuard;
 use crate::audio::AudioChunk;
 use crate::{Error, Result};
@@ -19,12 +22,13 @@ use windows::core::{implement, HRESULT, Interface, IUnknown, Ref};
 use windows::Win32::Media::Audio::{
     ActivateAudioInterfaceAsync, AUDIOCLIENT_ACTIVATION_PARAMS, AUDIOCLIENT_ACTIVATION_PARAMS_0,
     AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
-    AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
-    IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
-    IActivateAudioInterfaceCompletionHandler_Impl, IAudioClient,
-    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE, VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+    AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM, AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+    AUDCLNT_STREAMFLAGS_LOOPBACK, IActivateAudioInterfaceAsyncOperation,
+    IActivateAudioInterfaceCompletionHandler, IActivateAudioInterfaceCompletionHandler_Impl,
+    IAudioClient, PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE, VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+    WAVEFORMATEX,
 };
-use windows::Win32::System::Com::BLOB;
+use windows::Win32::System::Com::{CoTaskMemAlloc, BLOB};
 use windows::Win32::System::Com::StructuredStorage::{
     PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
 };
@@ -98,7 +102,8 @@ pub(crate) fn spawn_process_loopback(
     //    b) windows-rs 的 PROPVARIANT 自带 Drop=PropVariantClear，会对 VT_BLOB 的
     //       pBlobData 做 CoTaskMemFree——栈 blob 即对栈指针做堆释放（0xC0000374/
     //       0xC0000409 崩溃）。官方 C++ 样例语义是「栈参数 + 无人 clear」，故用
-    //       外层 ManuallyDrop 抑制 Drop（内层包 ManuallyDrop 无效，Drop 在外层）。
+    //       外层 ManuallyDrop 抑制 Drop（内层 ManuallyDrop 是 windows-rs 字段类型
+    //       本身的形状要求，不承担抑制职责，去掉会编译不过）。
     let mut activation_params: AUDIOCLIENT_ACTIVATION_PARAMS = AUDIOCLIENT_ACTIVATION_PARAMS {
         ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
         Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
@@ -166,18 +171,17 @@ pub(crate) fn spawn_process_loopback(
     };
 
     // 4. 进程 loopback 的激活客户端不支持 GetMixFormat（真机实测 E_NOTIMPL）；
-    //    官方 ApplicationLoopback 样例同样自备格式（16bit PCM/44.1k）。这里自备
-    //    引擎原生格式 f32/2ch/48k——与采集循环的 f32 解读及共享模式引擎一致，
-    //    声道合并与 48k→16k 重采样沿用既有链路。
+    //    自备引擎原生格式 f32/2ch/48k（与采集循环的 f32 解读一致，声道合并与
+    //    48k→16k 重采样沿用既有链路）。Initialize 须带 AUTOCONVERTPCM（官方
+    //    ApplicationLoopback 样例同款）：让引擎在自备格式与机器混音格式不一致
+    //    时（如用户设了 44.1k 的输出设备）自动转换，否则 Initialize 会拒。
     let mix_format = unsafe {
-        let p = windows::Win32::System::Com::CoTaskMemAlloc(
-            std::mem::size_of::<windows::Win32::Media::Audio::WAVEFORMATEX>(),
-        ) as *mut windows::Win32::Media::Audio::WAVEFORMATEX;
+        let p = CoTaskMemAlloc(std::mem::size_of::<WAVEFORMATEX>()) as *mut WAVEFORMATEX;
         if p.is_null() {
             return Err(Error::AudioSource(format!("[{tag}] CoTaskMemAlloc(WAVEFORMATEX) 失败")));
         }
-        *p = windows::Win32::Media::Audio::WAVEFORMATEX {
-            wFormatTag: super::device::WAVE_FORMAT_IEEE_FLOAT,
+        *p = WAVEFORMATEX {
+            wFormatTag: WAVE_FORMAT_IEEE_FLOAT,
             nChannels: 2,
             nSamplesPerSec: 48000,
             wBitsPerSample: 32,
@@ -194,9 +198,11 @@ pub(crate) fn spawn_process_loopback(
         tag,
         audio_client,
         mix_format,
-        AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+        AUDCLNT_STREAMFLAGS_LOOPBACK
+            | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
+            | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
         0,
-        true,
+        false,
         tx,
         counter,
     );

@@ -295,4 +295,42 @@ mod tests {
         assert_eq!(targets[0].id, "system:100,200");
         assert_eq!(targets[0].name, "Chrome");
     }
+
+    use super::{resample_to_target, ResamplerState};
+
+    /// 回归锁：Windows 事件驱动采集每 ~10ms 到 480 样本（远小于 FixedIn 的
+    /// 1024 chunk），旧实现逐包以 partial 输入调用 rubato 产出 2.13 倍样本量
+    /// 的坏数据（真机实测 5s 窗口 170666 样本）。缓冲语义必须满足：
+    /// 凑不满整块无输出、总输出量 ≈ 输入量 × (16000/源采样率)。
+    #[test]
+    fn resample_accumulates_until_full_chunk() {
+        let mut state = ResamplerState::default();
+        let packet = vec![0.5f32; 480];
+
+        // 960 < 1024：前两包不产出
+        assert!(resample_to_target(&packet, 48000, &mut state).is_empty());
+        assert!(resample_to_target(&packet, 48000, &mut state).is_empty());
+        // 第三包凑满 1440 → 处理一个整块
+        assert!(!resample_to_target(&packet, 48000, &mut state).is_empty());
+
+        // 30 包共 14400 输入；输出 = 已消费整块 × 1/3，残留 < 1024 输入
+        let mut total = 0;
+        let mut state = ResamplerState::default();
+        for _ in 0..30 {
+            total += resample_to_target(&packet, 48000, &mut state).len();
+        }
+        let expected = 30 * 480 / 3;
+        assert!(
+            total > expected - 342 && total <= expected,
+            "total={total} expected≈{expected}（残留 <1024 输入样本 ≈ 341 输出）"
+        );
+    }
+
+    #[test]
+    fn resample_passthrough_when_target_rate() {
+        let mut state = ResamplerState::default();
+        let out = resample_to_target(&[0.25, -0.75, 0.5], 16000, &mut state);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0], (0.25 * 32767.0) as i16);
+    }
 }
