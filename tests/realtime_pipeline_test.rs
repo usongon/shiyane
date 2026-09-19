@@ -166,3 +166,32 @@ async fn realtime_state_transitions_from_idle() {
     assert!(pipeline.stop().await.is_ok());
     assert_eq!(pipeline.get_state().await, RealtimeState::Stopped);
 }
+
+struct FailingAsrProvider;
+
+#[async_trait]
+impl AsrProvider for FailingAsrProvider {
+    async fn start_stream(&self, _config: &AsrConfig) -> Result<Box<dyn AsrStream>> {
+        Err(pick_up_sound_text::Error::Asr(
+            "401 unauthorized (simulated missing api key)".to_string(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn failed_connect_marks_pipeline_failed_not_connecting() {
+    // 真机 bug 回归锁：无 API key 时 start_stream 失败，pipeline 内部状态曾卡
+    // Connecting；重启守卫优先读内部状态，卡 Connecting 会永久拒绝新会话，
+    // 用户只能重启应用（2026-09-19 Windows 真机验收发现）
+    let mut pipeline = RealtimePipeline::new(
+        Box::new(MockCaptureSource { chunks: vec![] }),
+        Box::new(FailingAsrProvider),
+        Arc::new(MockTranslateProvider),
+        AppConfig::default(),
+        "en".to_string(),
+        "s1".to_string(),
+        vec![],
+    );
+    assert!(pipeline.connect_streams().await.is_err());
+    assert_eq!(pipeline.get_state().await, RealtimeState::Failed);
+}
