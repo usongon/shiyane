@@ -36,6 +36,12 @@ Turn videos into bilingual SRT/VTT subtitles, or turn system audio/microphone in
 
 Download the `.dmg` from [Releases](https://github.com/usongon/shiyane/releases) and drag the app into Applications. ffmpeg/ffprobe are bundled — no command-line tools needed.
 
+The app is not developer-signed, so macOS attaches a quarantine flag to internet downloads and the first launch may report the app as "damaged" — the file itself is fine. Run this once in Terminal to fix it (one time only):
+
+```bash
+xattr -cr /Applications/Shiyane.app
+```
+
 ### Windows
 
 Download the `.exe` installer from [Releases](https://github.com/usongon/shiyane/releases) (NSIS, per-user install, no administrator required). Requires Windows 11 x64.
