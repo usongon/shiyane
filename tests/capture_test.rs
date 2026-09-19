@@ -1,6 +1,4 @@
-use pick_up_sound_text::audio::capture::{
-    create_capture_source, CaptureKind, CaptureSource, CaptureTarget,
-};
+use pick_up_sound_text::audio::capture::{create_capture_source, CaptureKind, CaptureTarget};
 
 #[test]
 fn capture_target_serialization() {
