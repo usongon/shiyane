@@ -170,9 +170,12 @@ fn main() {
                         let _ = overlay.hide();
                     }
 
-                    // 清理完毕，允许关闭
+                    // 清理完毕，允许关闭。必须用 destroy() 而非 close()：
+                    // close() 会再次触发 CloseRequested → 本处理器再次
+                    // prevent_close + spawn → 无限递归，事件循环刷爆、
+                    // CPU 打满、窗口冻结永不退出（真机 B4 验收发现）
                     if let Some(window) = app_handle.get_webview_window("main") {
-                        let _ = window.close();
+                        let _ = window.destroy();
                     }
                 });
             }
