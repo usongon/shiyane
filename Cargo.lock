@@ -2894,7 +2894,7 @@ dependencies = [
 
 [[package]]
 name = "pick-up-sound-text"
-version = "0.0.4"
+version = "0.0.5"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2926,6 +2926,8 @@ dependencies = [
  "tracing-subscriber",
  "urlencoding",
  "uuid",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
 ]
 
 [[package]]

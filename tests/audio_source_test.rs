@@ -1,5 +1,4 @@
-use pick_up_sound_text::audio::{AudioChunk, AudioSource};
-use std::time::Duration;
+use pick_up_sound_text::audio::AudioChunk;
 
 #[tokio::test]
 async fn test_audio_chunk_creation() {

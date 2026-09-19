@@ -1,6 +1,4 @@
-use pick_up_sound_text::audio::capture::{
-    create_capture_source, CaptureKind, CaptureSource, CaptureTarget,
-};
+use pick_up_sound_text::audio::capture::{create_capture_source, CaptureKind, CaptureTarget};
 
 #[test]
 fn capture_target_serialization() {
@@ -24,11 +22,11 @@ async fn create_capture_source_returns_platform_impl() {
 }
 
 #[tokio::test]
-async fn windows_stub_returns_error_on_start() {
+async fn empty_targets_returns_error_on_windows() {
     #[cfg(target_os = "windows")]
     {
         let mut source = create_capture_source();
-        let result = source.start(&["mic".to_string()]).await;
+        let result = source.start(&[]).await;
         assert!(result.is_err());
     }
 }

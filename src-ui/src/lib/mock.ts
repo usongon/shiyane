@@ -54,6 +54,9 @@ export const mockBackend: Backend = {
     await delay(350);
     config = structuredClone(c);
   },
+  async getHostPlatform() {
+    return "macos" as const;
+  },
   async startFileProcessing(_videoPath, _sourceLanguage) {
     await delay(400);
     stopTimer();

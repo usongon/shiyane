@@ -26,6 +26,7 @@ export interface Backend {
   readonly mocked: boolean;
   getConfig(): Promise<AppConfig>;
   saveConfig(config: AppConfig): Promise<void>;
+  getHostPlatform(): Promise<"macos" | "windows">;
   startFileProcessing(videoPath: string, sourceLanguage: string): Promise<string>;
   pauseFileProcessing(): Promise<void>;
   stopFileProcessing(videoPath: string): Promise<void>;
@@ -63,6 +64,7 @@ const tauriBackend: Backend = {
   mocked: false,
   getConfig: () => invoke<AppConfig>("get_config"),
   saveConfig: (config) => invoke<void>("save_config", { config }),
+  getHostPlatform: () => invoke<"macos" | "windows">("get_host_platform"),
   startFileProcessing: (videoPath, sourceLanguage) =>
     invoke<string>("start_file_processing", { videoPath, sourceLanguage }),
   pauseFileProcessing: () => invoke<void>("pause_file_processing"),

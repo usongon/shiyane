@@ -1,0 +1,6 @@
+{
+  "bundle": {
+    "resources": { "macos-strings/": "" },
+    "macOS": { "infoPlist": "macos-Info.plist" }
+  }
+}

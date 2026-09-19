@@ -167,6 +167,9 @@ body {
 .view {
   flex: 1;
   min-height: 0;
+  /* flex 项默认 min-width:auto 会随内容 min-content 撑破窗口（长文件名曾把
+     开始按钮挤出窗口），所有视图容器统一放行收缩 */
+  min-width: 0;
   display: flex;
   flex-direction: column;
   padding: 16px 18px 18px;
@@ -619,4 +622,9 @@ body {
   display: block; /* 覆盖 overlay-source 的 -webkit-box 截断 */
   -webkit-line-clamp: unset;
   overflow: visible;
+}
+
+/* Windows：无红绿灯，左侧留白收缩；不可拖拽（原生标题栏负责） */
+.titlebar-win .titlebar-left {
+  min-width: 0;
 }

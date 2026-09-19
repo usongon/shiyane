@@ -65,6 +65,15 @@ sudo apt install ffmpeg
 # Windows：从 https://ffmpeg.org/download.html 下载
 ```
 
+## Windows 安装
+
+- 系统要求：Windows 11（x64）
+- 下载 release 中的 `.exe` 安装包（NSIS，当前用户安装，无需管理员）
+- 首次运行 SmartScreen 提示：点「更多信息」→「仍要运行」（未签名，详见下方说明）
+- 已知限制：DRM 内容与个别应用（如 Teams 会议）的进程级音频无法捕获，此时选择「系统音频（全部）」即可
+
+> 当前 Windows 安装包未做代码签名，SmartScreen 会弹出警告。这是独立开发者发布的常见情况，包内容可对照 release 的 sha256 校验。
+
 ## 从源码构建
 
 ```bash
@@ -82,6 +91,8 @@ cargo tauri build           # 会自动在 src-ui/ 安装依赖并构建前端
 ```
 
 不运行 `build-ffmpeg.sh` 也可构建，此时应用回落到系统 PATH 中的 ffmpeg。
+
+Windows 构建需在 Windows 11 + VS Build Tools 环境执行 `cargo tauri build`；ffmpeg sidecar 用 `scripts/fetch-ffmpeg-windows.sh` 拉取。
 
 构建产物在 `target/release/bundle/` 目录下。第三方组件许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 

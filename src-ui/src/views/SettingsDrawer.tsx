@@ -107,9 +107,12 @@ function toConfig(v: FormValues, opts: { withOss: boolean }): AppConfig {
 export default function SettingsDrawer({
   open,
   onClose,
+  onAbout,
 }: {
   open: boolean;
   onClose: () => void;
+  /** 仅 Windows 提供（无菜单栏平台）；点击打开关于弹窗 */
+  onAbout?: () => void;
 }) {
   const backend = useContext(BackendContext);
   const { message } = AntdApp.useApp();
@@ -342,6 +345,11 @@ export default function SettingsDrawer({
         <Button type="primary" block loading={saving} onClick={onSave}>
           保存配置
         </Button>
+        {onAbout && (
+          <Button type="link" size="small" block style={{ padding: 0, marginTop: 8 }} onClick={onAbout}>
+            关于拾言
+          </Button>
+        )}
       </div>
     </Drawer>
   );

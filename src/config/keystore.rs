@@ -5,7 +5,7 @@ use aes_gcm::{
 use argon2::Argon2;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use rand::RngCore;
-use std::path::PathBuf;
+use std::path::Path;
 use crate::{Error, Result};
 
 /// Key store for encrypting/decrypting API keys
@@ -14,10 +14,12 @@ pub struct KeyStore {
 }
 
 impl KeyStore {
-    /// Create a new KeyStore with a key derived from machine UUID + app salt
-    pub fn new() -> Result<Self> {
+    /// Create a new KeyStore with a key derived from machine UUID + app salt.
+    /// salt 存于 data_dir——迁移（migrate_legacy_config）必须先于本调用，
+    /// 否则新目录会先生成新盐，旧密文永不可解
+    pub fn new(data_dir: &Path) -> Result<Self> {
         let machine_id = Self::get_machine_id()?;
-        let salt = Self::get_or_create_salt()?;
+        let salt = Self::get_or_create_salt(data_dir)?;
         
         // Derive key using Argon2
         let mut key = [0u8; 32];
@@ -85,28 +87,57 @@ impl KeyStore {
         Ok(uuid.as_bytes().to_vec())
     }
     
-    #[cfg(not(target_os = "macos"))]
+    /// Windows：注册表 MachineGuid（HKLM\SOFTWARE\Microsoft\Cryptography）
+    #[cfg(target_os = "windows")]
+    fn get_machine_id() -> Result<Vec<u8>> {
+        use windows::core::HSTRING;
+        use windows::Win32::System::Registry::{
+            RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ,
+        };
+        let subkey = HSTRING::from("SOFTWARE\\Microsoft\\Cryptography");
+        let value = HSTRING::from("MachineGuid");
+        let mut buf = [0u16; 128];
+        let mut len = (buf.len() * 2) as u32;
+        let ret = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                &subkey,
+                &value,
+                RRF_RT_REG_SZ,
+                None,
+                Some(buf.as_mut_ptr().cast()),
+                Some(&mut len),
+            )
+        };
+        if ret.is_err() {
+            return Err(Error::Config(format!("读取 MachineGuid 失败: {ret:?}")));
+        }
+        let s = String::from_utf16_lossy(&buf[..(len as usize / 2).saturating_sub(1)]);
+        Ok(s.trim().as_bytes().to_vec())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     fn get_machine_id() -> Result<Vec<u8>> {
         // Fallback for other platforms
         Ok(b"default-machine-id".to_vec())
     }
-    
+
     /// Get or create app salt
-    fn get_or_create_salt() -> Result<Vec<u8>> {
-        let salt_path = Self::salt_path()?;
-        
+    fn get_or_create_salt(data_dir: &Path) -> Result<Vec<u8>> {
+        let salt_path = data_dir.join("salt");
+
         if salt_path.exists() {
             let salt = std::fs::read(&salt_path)?;
             Ok(salt)
         } else {
             let mut salt = vec![0u8; 32];
             rand::thread_rng().fill_bytes(&mut salt);
-            
+
             if let Some(parent) = salt_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(&salt_path, &salt)?;
-            
+
             // Set permissions to 0600 (owner read/write only)
             #[cfg(unix)]
             {
@@ -115,30 +146,25 @@ impl KeyStore {
                 perms.set_mode(0o600);
                 std::fs::set_permissions(&salt_path, perms)?;
             }
-            
+
             Ok(salt)
         }
-    }
-    
-    fn salt_path() -> Result<PathBuf> {
-        let home = dirs::home_dir()
-            .ok_or_else(|| Error::Config("Cannot find home directory".to_string()))?;
-        Ok(home.join("Library/Application Support/pick-up-sound-text/salt"))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_encrypt_decrypt() {
-        let keystore = KeyStore::new().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let keystore = KeyStore::new(dir.path()).unwrap();
         let plaintext = "test-api-key-12345";
-        
+
         let encrypted = keystore.encrypt(plaintext).unwrap();
         let decrypted = keystore.decrypt(&encrypted).unwrap();
-        
+
         assert_eq!(plaintext, decrypted);
     }
 }

@@ -62,6 +62,9 @@ pub struct AppState {
     pub pipeline_entries: Arc<Mutex<Option<Arc<Mutex<Vec<SubtitleEntry>>>>>>,
     pub processing_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     pub config: Arc<Mutex<AppConfig>>,
+    /// 应用数据目录（config.json/salt 所在；main setup 时注入，
+    /// save_config 等命令经它定位存储位置）
+    pub data_dir: PathBuf,
     pub pipeline: Arc<Mutex<Option<FilePipeline>>>,
     pub pipeline_progress: Arc<Mutex<Option<Arc<Mutex<f64>>>>>,
     pub pipeline_phase: Arc<Mutex<Option<Arc<Mutex<pick_up_sound_text::pipeline::Phase>>>>>,
@@ -114,8 +117,21 @@ pub async fn get_config(state: State<'_, AppState>) -> Result<AppConfig, String>
 pub async fn save_config(config: AppConfig, state: State<'_, AppState>) -> Result<(), String> {
     let mut config_guard = state.config.lock().await;
     *config_guard = config.clone();
-    config.save().map_err(|e| e.to_string())?;
+    config.save(&state.data_dir).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// 宿主平台标识（"macos" | "windows" | 其他 OS 常量），前端经
+/// invoke("get_host_platform") 区分平台分支（如 About 展示路径）
+#[tauri::command]
+pub fn get_host_platform() -> String {
+    if cfg!(target_os = "macos") {
+        "macos".to_string()
+    } else if cfg!(target_os = "windows") {
+        "windows".to_string()
+    } else {
+        std::env::consts::OS.to_string()
+    }
 }
 
 #[tauri::command]

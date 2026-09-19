@@ -171,7 +171,29 @@ impl RealtimePipeline {
 
         self.app_handle = Some(app_handle.clone());
 
-        // 启动 ASR 连接
+        let (asr_stream, audio_rx) = self.connect_streams().await?;
+        self.spawn_session_tasks(asr_stream, audio_rx, app_handle).await;
+
+        Ok(())
+    }
+
+    /// 连接 ASR 流与音频采集（start 与 resume 共用）。任何一步失败都会把
+    /// 内部状态置为 Failed：重启守卫优先读内部状态，若卡在
+    /// Connecting/Reconnecting 会永久拒绝新会话，用户只能重启应用。
+    /// 不在此发 state-change 事件——命令层对连接失败已有统一的失败处理。
+    pub async fn connect_streams(
+        &mut self,
+    ) -> Result<(Box<dyn AsrStream>, mpsc::Receiver<AudioChunk>)> {
+        let connected = self.connect_streams_inner().await;
+        if connected.is_err() {
+            *self.state.lock().await = RealtimeState::Failed;
+        }
+        connected
+    }
+
+    async fn connect_streams_inner(
+        &mut self,
+    ) -> Result<(Box<dyn AsrStream>, mpsc::Receiver<AudioChunk>)> {
         let asr_config = AsrConfig {
             provider: self.config.asr.provider.clone(),
             model: self.config.asr.realtime_model.clone(),
@@ -180,18 +202,15 @@ impl RealtimePipeline {
             workspace_id: self.config.asr.workspace_id.clone(),
         };
 
-        let asr_provider = self.asr_provider.as_ref()
-            .ok_or_else(|| Error::Asr("ASR provider not initialized".to_string()))?;
-        let asr_stream = asr_provider.start_stream(&asr_config).await?;
+        let asr_stream = self.asr_provider.as_ref()
+            .ok_or_else(|| Error::Asr("ASR provider not initialized".to_string()))?
+            .start_stream(&asr_config).await?;
 
-        // 启动音频采集（用户选中的音源；空则由平台实现决定默认行为）
-        let capture_source = self.capture_source.as_mut()
-            .ok_or_else(|| Error::AudioSource("Capture source not initialized".to_string()))?;
-        let audio_rx = capture_source.start(&self.capture_target_ids.clone()).await?;
+        let audio_rx = self.capture_source.as_mut()
+            .ok_or_else(|| Error::AudioSource("Capture source not initialized".to_string()))?
+            .start(&self.capture_target_ids.clone()).await?;
 
-        self.spawn_session_tasks(asr_stream, audio_rx, app_handle).await;
-
-        Ok(())
+        Ok((asr_stream, audio_rx))
     }
 
     /// 组装三并发 task + 监护 task，置 Listening 并发事件。
@@ -282,6 +301,11 @@ impl RealtimePipeline {
 
     /// 恢复：新建 ASR 连接 + 重启采集，时间轴偏移与条目序号延续上一段
     pub async fn resume(&mut self) -> Result<()> {
+        // 先取 app_handle 再改状态：缺失（会话从未 start）时返回 Err
+        // 状态仍是 Paused，可重试/停止，不会卡 Reconnecting
+        let app_handle = self.app_handle.clone()
+            .ok_or_else(|| Error::AudioSource("Session not started".to_string()))?;
+
         let mut state = self.state.lock().await;
         if *state != RealtimeState::Paused {
             return Err(Error::AudioSource("Not paused".to_string()));
@@ -289,28 +313,10 @@ impl RealtimePipeline {
         *state = RealtimeState::Reconnecting;
         drop(state);
 
-        let app_handle = self.app_handle.clone()
-            .ok_or_else(|| Error::AudioSource("Session not started".to_string()))?;
-
         // 重置 cancel token（旧任务已全部退出）
         self.cancel = CancellationToken::new();
 
-        let asr_config = AsrConfig {
-            provider: self.config.asr.provider.clone(),
-            model: self.config.asr.realtime_model.clone(),
-            api_key: self.config.asr.api_key.clone(),
-            language: self.source_language.clone(),
-            workspace_id: self.config.asr.workspace_id.clone(),
-        };
-
-        let asr_provider = self.asr_provider.as_ref()
-            .ok_or_else(|| Error::Asr("ASR provider not initialized".to_string()))?;
-        let asr_stream = asr_provider.start_stream(&asr_config).await?;
-
-        let capture_source = self.capture_source.as_mut()
-            .ok_or_else(|| Error::AudioSource("Capture source not initialized".to_string()))?;
-        let audio_rx = capture_source.start(&self.capture_target_ids.clone()).await?;
-
+        let (asr_stream, audio_rx) = self.connect_streams().await?;
         self.spawn_session_tasks(asr_stream, audio_rx, app_handle).await;
 
         Ok(())
