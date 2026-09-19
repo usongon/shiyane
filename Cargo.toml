@@ -1,6 +1,6 @@
 [package]
 name = "pick-up-sound-text"
-version = "0.0.5"
+version = "0.0.6"
 authors = ["usong <zdhuntero@gmail.com>"]
 edition = "2024"
 
