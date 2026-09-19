@@ -57,7 +57,7 @@ export const mockBackend: Backend = {
   async getHostPlatform() {
     return "macos" as const;
   },
-  async startFileProcessing(_videoPath, _sourceLanguage) {
+  async startFileProcessing(_videoPath, _sourceLanguage, _diarization) {
     await delay(400);
     stopTimer();
     progress = { state: "processing", progress: 0.02, error: null, phase: "extracting" };
@@ -154,9 +154,9 @@ export const mockBackend: Backend = {
   async getTaskStatus(videoPath) {
     await delay(200);
     if (videoPath.includes("tears_of_steel"))
-      return { state: "completed", percent: 1, source_language: "en" };
+      return { state: "completed", percent: 1, source_language: "en", diarization: false };
     if (videoPath.includes("product_demo"))
-      return { state: "translating", percent: 0.45, source_language: "ja" };
+      return { state: "translating", percent: 0.45, source_language: "ja", diarization: true };
     return { state: "fresh", percent: 0 };
   },
   async pickVideoFile() {

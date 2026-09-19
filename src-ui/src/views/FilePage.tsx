@@ -5,6 +5,7 @@ import {
   Progress,
   Select,
   Steps,
+  Switch,
   Tooltip,
   Typography,
   message as staticMessage,
@@ -34,6 +35,8 @@ const LANGUAGES = [
   { value: "ko", label: "韩文" },
 ];
 
+const langLabel = (v: string) => LANGUAGES.find((l) => l.value === v)?.label ?? v;
+
 const STATUS_LABEL: Record<PipelineStateName, string> = {
   idle: "准备中",
   processing: "处理中",
@@ -56,6 +59,7 @@ export default function FilePage({ active }: { active: boolean }) {
 
   const [file, setFile] = useState<{ path: string; name: string } | null>(null);
   const [language, setLanguage] = useState("auto");
+  const [diarization, setDiarization] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [starting, setStarting] = useState(false);
   const [pausing, setPausing] = useState(false);
@@ -128,6 +132,9 @@ export default function FilePage({ active }: { active: boolean }) {
           // 语言不符会触发全量重跑而不是续传
           if (status.state !== "fresh" && status.source_language) {
             setLanguage(status.source_language);
+          }
+          if (status.state !== "fresh" && status.diarization !== undefined) {
+            setDiarization(status.diarization);
           }
         })
         .catch(() => setFileStatus(null));
@@ -203,7 +210,7 @@ export default function FilePage({ active }: { active: boolean }) {
     if (!file) return;
     setStarting(true);
     try {
-      const id = await backend.startFileProcessing(file.path, language);
+      const id = await backend.startFileProcessing(file.path, language, diarization);
       setTask({
         id,
         fileName: file.name,
@@ -224,14 +231,18 @@ export default function FilePage({ active }: { active: boolean }) {
 
   const onStart = () => {
     if (!file || taskRunning) return;
-    // 可续传任务的源语言被改过 → 续传失效，弹窗确认后再全量重跑
-    if (langChanged && fileStatus) {
-      const langLabel = (v: string) => LANGUAGES.find((l) => l.value === v)?.label ?? v;
+    // 可续传任务的语言/开关被改过 → 续传失效，弹窗确认后再全量重跑
+    if ((langChanged || diarChanged) && fileStatus) {
+      const changes: string[] = [];
+      if (langChanged)
+        changes.push(`源语言（${langLabel(fileStatus.source_language!)} → ${langLabel(language)}）`);
+      if (diarChanged) {
+        const sw = (v: boolean) => (v ? "开" : "关");
+        changes.push(`区分说话人（${sw(fileStatus.diarization!)} → ${sw(diarization)}）`);
+      }
       modal.confirm({
-        title: "源语言已改变",
-        content: `该任务已有 ${Math.round(fileStatus.percent * 100)}% 进度（源语言：${langLabel(
-          fileStatus.source_language!,
-        )}）。当前选择的源语言是「${langLabel(language)}」，语言不同将放弃已有进度全量重跑（含重新转写与上传）。`,
+        title: "任务参数已改变",
+        content: `该任务已有 ${Math.round(fileStatus.percent * 100)}% 进度。${changes.join("、")}与原任务不同，将放弃已有进度全量重跑（含重新转写与上传）。`,
         okText: "放弃进度，全量重跑",
         okButtonProps: { danger: true },
         cancelText: "取消",
@@ -339,6 +350,11 @@ export default function FilePage({ active }: { active: boolean }) {
     fileStatus?.state === "translating" &&
     !!fileStatus.source_language &&
     fileStatus.source_language !== language;
+  // 可续传任务的「区分说话人」开关被改过 → 同样续传失效
+  const diarChanged =
+    fileStatus?.state === "translating" &&
+    fileStatus.diarization !== undefined &&
+    fileStatus.diarization !== diarization;
 
   const phase = task?.progress.phase ?? "idle";
   const stepIndex = !task
@@ -502,6 +518,27 @@ export default function FilePage({ active }: { active: boolean }) {
               aria-label="视频语言"
               disabled={taskRunning}
             />
+            <Tooltip title="多人对话时按说话人切分句子，导出不含标签；开启后单个音频最长 2 小时">
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  fontSize: 12,
+                  color: token.colorTextSecondary,
+                  cursor: "pointer",
+                  userSelect: "none",
+                }}
+              >
+                区分说话人
+                <Switch
+                  size="small"
+                  checked={diarization}
+                  onChange={setDiarization}
+                  disabled={taskRunning}
+                />
+              </label>
+            </Tooltip>
             {!taskRunning && (
               <Tooltip
                 title={
