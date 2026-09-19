@@ -27,7 +27,7 @@ export interface Backend {
   getConfig(): Promise<AppConfig>;
   saveConfig(config: AppConfig): Promise<void>;
   getHostPlatform(): Promise<"macos" | "windows">;
-  startFileProcessing(videoPath: string, sourceLanguage: string): Promise<string>;
+  startFileProcessing(videoPath: string, sourceLanguage: string, diarization: boolean): Promise<string>;
   pauseFileProcessing(): Promise<void>;
   stopFileProcessing(videoPath: string): Promise<void>;
   deleteTask(taskId: string): Promise<void>;
@@ -65,8 +65,8 @@ const tauriBackend: Backend = {
   getConfig: () => invoke<AppConfig>("get_config"),
   saveConfig: (config) => invoke<void>("save_config", { config }),
   getHostPlatform: () => invoke<"macos" | "windows">("get_host_platform"),
-  startFileProcessing: (videoPath, sourceLanguage) =>
-    invoke<string>("start_file_processing", { videoPath, sourceLanguage }),
+  startFileProcessing: (videoPath, sourceLanguage, diarization) =>
+    invoke<string>("start_file_processing", { videoPath, sourceLanguage, diarization }),
   pauseFileProcessing: () => invoke<void>("pause_file_processing"),
   stopFileProcessing: (videoPath) =>
     invoke<void>("stop_file_processing", { videoPath }),

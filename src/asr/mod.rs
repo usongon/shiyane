@@ -33,6 +33,8 @@ pub struct AsrConfig {
     pub api_key: String,
     pub language: String,
     pub workspace_id: Option<String>,
+    /// 文件转写：开启说话人分离（实时链路忽略）
+    pub diarization: bool,
 }
 
 #[async_trait]

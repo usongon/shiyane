@@ -14,11 +14,16 @@ use std::time::Duration;
 struct MockAudioSource {
     chunks: Vec<AudioChunk>,
     index: usize,
+    duration: Duration,
 }
 
 impl MockAudioSource {
     fn new(chunks: Vec<AudioChunk>) -> Self {
-        Self { chunks, index: 0 }
+        Self::with_duration(chunks, Duration::from_secs(10))
+    }
+
+    fn with_duration(chunks: Vec<AudioChunk>, duration: Duration) -> Self {
+        Self { chunks, index: 0, duration }
     }
 }
 
@@ -42,7 +47,7 @@ impl AudioSource for MockAudioSource {
     }
 
     fn total_duration(&self) -> Option<Duration> {
-        Some(Duration::from_secs(10))
+        Some(self.duration)
     }
 
     async fn extract_full_audio_to_wav(&self) -> Result<std::path::PathBuf> {
@@ -109,6 +114,7 @@ async fn test_pipeline_process_with_mock() {
         Box::new(MockTranslateProvider),
         AppConfig::default(),
         "auto".to_string(),
+        false,
     );
 
     assert_eq!(pipeline.get_state().await, PipelineState::Idle);
@@ -124,4 +130,40 @@ async fn test_pipeline_process_with_mock() {
     assert_eq!(entries[0].status, SubtitleStatus::Final);
     assert_eq!(entries[0].content_start, 0.0);
     assert_eq!(entries[0].content_end, 1.0);
+}
+
+#[tokio::test]
+async fn diarization_caps_duration_at_2h() {
+    let chunks = vec![AudioChunk { pcm: vec![0i16; 1600], content_time_ms: 0, wall_time_ms: 1000 }];
+    let mut pipeline = FilePipeline::new(
+        Box::new(MockAudioSource::with_duration(chunks, Duration::from_secs(2 * 3600 + 60))),
+        Box::new(MockFileAsrProvider),
+        Box::new(MockTranslateProvider),
+        AppConfig::default(),
+        "auto".to_string(),
+        true,
+    );
+
+    let result = pipeline.process().await;
+    assert!(result.is_err());
+    match pipeline.get_state().await {
+        PipelineState::Failed(msg) => assert!(msg.contains("区分说话人"), "文案应指向开关：{}", msg),
+        other => panic!("预期 Failed，实际 {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn duration_2h30m_still_allowed_without_diarization() {
+    let chunks = vec![AudioChunk { pcm: vec![0i16; 1600], content_time_ms: 0, wall_time_ms: 1000 }];
+    let mut pipeline = FilePipeline::new(
+        Box::new(MockAudioSource::with_duration(chunks, Duration::from_secs(2 * 3600 + 1800))),
+        Box::new(MockFileAsrProvider),
+        Box::new(MockTranslateProvider),
+        AppConfig::default(),
+        "auto".to_string(),
+        false,
+    );
+
+    pipeline.process().await.unwrap();
+    assert_eq!(pipeline.get_state().await, PipelineState::Completed);
 }

@@ -25,6 +25,7 @@ Turn videos into bilingual SRT/VTT subtitles, or turn system audio/microphone in
 ## Features
 
 - **File to subtitles** — drop a video (mp4, mkv, avi, mov, ...), pick the source language (or auto-detect), export SRT/VTT with both source and translated text. Up to 3 hours per video. Live per-sentence progress; tasks resume from where they stopped after a crash or restart (no re-upload or re-transcription); pause anytime, stop resets the task. Recently processed videos and their status are listed on the home screen for resuming or removal.
+  - Optional speaker separation: multi-speaker dialogue is segmented per speaker (no labels in exports, 2-hour maximum per audio).
 - **Realtime subtitles** — capture system audio (per-app selectable) or microphone, with live source text + translation; pause/resume/stop.
 - **Floating subtitle overlay** — a separate always-on-top subtitle bar, for watching videos or meetings without switching apps; adjustable background opacity.
 - **Keys stay local** — API keys are encrypted on disk (AES-256-GCM + Argon2) and only ever sent to the respective APIs.

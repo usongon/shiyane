@@ -43,6 +43,10 @@ pub struct TaskStatus {
     /// 翻译重试用尽、回退为原文的句数（完成态提示用；0 或未完成时不返回）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback_count: Option<usize>,
+    /// checkpoint 记录的「区分说话人」开关；仅文件任务 translating/completed 有值。
+    /// 前端用它把开关自动选回原值，改动则触发全量重跑确认（与源语言同机制）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diarization: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -138,13 +142,15 @@ pub fn get_host_platform() -> String {
 pub async fn start_file_processing(
     video_path: String,
     source_language: String,
+    diarization: bool,
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     tracing::info!(
-        "start_file_processing called: video_path={}, source_language={}",
+        "start_file_processing called: video_path={}, source_language={}, diarization={}",
         video_path,
-        source_language
+        source_language,
+        diarization
     );
 
     let _control = state.control.lock().await;
@@ -180,6 +186,7 @@ pub async fn start_file_processing(
         Box::new(translate_provider),
         config.clone(),
         source_language.clone(),
+        diarization,
     );
 
     // Stable task_id（path+size+mtime）：同文件重跑续传，换文件天然隔离
@@ -193,6 +200,7 @@ pub async fn start_file_processing(
         translate_provider: config.translate.provider.clone(),
         translate_model: config.translate.model.clone(),
         asr_model: config.asr.file_model.clone(),
+        diarization,
     };
     pipeline
         .init_checkpoint_in(
@@ -487,12 +495,12 @@ pub async fn get_task_status(
             .join("progress.jsonl");
 
         let cp = match Checkpoint::load(&cp_path).map_err(|e| e.to_string())? {
-            None => return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0, source_language: None, fallback_count: None }),
+            None => return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0, source_language: None, fallback_count: None, diarization: None }),
             Some(c) => c,
         };
 
         if cp.segments.is_empty() {
-            return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0, source_language: None, fallback_count: None });
+            return Ok(TaskStatus { state: TaskState::Fresh, percent: 0.0, source_language: None, fallback_count: None, diarization: None });
         } else if cp.is_all_completed() {
             let fallback_count = cp.segments.iter().filter(|s| s.fallback).count();
             return Ok(TaskStatus {
@@ -500,6 +508,7 @@ pub async fn get_task_status(
                 percent: 1.0,
                 source_language: Some(cp.fingerprint.source_language.clone()),
                 fallback_count: (fallback_count > 0).then_some(fallback_count),
+                diarization: None,
             });
         } else {
             return Ok(TaskStatus {
@@ -507,6 +516,7 @@ pub async fn get_task_status(
                 percent: cp.percent(),
                 source_language: Some(cp.fingerprint.source_language.clone()),
                 fallback_count: None,
+                diarization: None,
             });
         }
     }
@@ -522,6 +532,7 @@ pub async fn get_task_status(
                 percent: 0.0,
                 source_language: None,
                 fallback_count: None,
+                diarization: None,
             });
         }
         Err(e) => return Err(e.to_string()),
@@ -535,6 +546,7 @@ pub async fn get_task_status(
                 percent: 0.0,
                 source_language: None,
                 fallback_count: None,
+                diarization: None,
             });
         }
         Some(c) => c,
@@ -543,6 +555,8 @@ pub async fn get_task_status(
     // 指纹感知：只比对可从当前 config 得知的 4 个字段（source_language 交给
     // 前端自动选回 + 按钮守卫，运行时管线做最终校验）。任一不同 → Fresh，
     // 不对用户承诺与实际不符的「继续处理 N%」
+    // diarization 是任务级参数（前端选择），不参与此比对——由前端还原开关值，
+    // 改动时走全量重跑确认弹窗（与源语言同机制），运行时管线做最终校验
     let config = state.config.lock().await.clone();
     let fp = &cp.fingerprint;
     if fp.target_lang != config.translate.target_lang
@@ -555,6 +569,7 @@ pub async fn get_task_status(
             percent: 0.0,
             source_language: None,
             fallback_count: None,
+            diarization: None,
         });
     }
 
@@ -564,6 +579,7 @@ pub async fn get_task_status(
             percent: 0.0,
             source_language: None,
             fallback_count: None,
+            diarization: None,
         })
     } else if cp.is_all_completed() {
         let fallback_count = cp.segments.iter().filter(|s| s.fallback).count();
@@ -572,6 +588,7 @@ pub async fn get_task_status(
             percent: 1.0,
             source_language: Some(cp.fingerprint.source_language.clone()),
             fallback_count: (fallback_count > 0).then_some(fallback_count),
+            diarization: Some(cp.fingerprint.diarization),
         })
     } else {
         Ok(TaskStatus {
@@ -579,6 +596,7 @@ pub async fn get_task_status(
             percent: cp.percent(),
             source_language: Some(cp.fingerprint.source_language.clone()),
             fallback_count: None,
+            diarization: Some(cp.fingerprint.diarization),
         })
     }
 }

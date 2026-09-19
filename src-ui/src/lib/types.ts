@@ -63,6 +63,8 @@ export interface TaskStatus {
   source_language?: string;
   /** 翻译重试用尽回退原文的句数，仅 completed 且 >0 时返回 */
   fallback_count?: number;
+  /** checkpoint 记录的「区分说话人」开关；仅文件任务 translating/completed 返回 */
+  diarization?: boolean;
 }
 
 export function basename(path: string): string {

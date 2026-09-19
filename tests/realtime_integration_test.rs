@@ -106,6 +106,7 @@ async fn realtime_checkpoint_save_and_load() {
         translate_provider: "openai".to_string(),
         translate_model: "gpt-3.5-turbo".to_string(),
         asr_model: "qwen-audio-3.0-asr-flash".to_string(),
+        diarization: false,
     };
 
     pipeline.init_checkpoint_in(dir.path().to_path_buf(), fingerprint.clone()).unwrap();
@@ -176,6 +177,7 @@ async fn realtime_checkpoint_with_segments() {
         translate_provider: "openai".to_string(),
         translate_model: "gpt-3.5-turbo".to_string(),
         asr_model: "qwen-audio-3.0-asr-flash".to_string(),
+        diarization: false,
     };
 
     pipeline.init_checkpoint_in(dir.path().to_path_buf(), fingerprint.clone()).unwrap();

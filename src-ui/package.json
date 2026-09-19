@@ -1,7 +1,7 @@
 {
   "name": "shiyane-ui",
   "private": true,
-  "version": "0.0.5",
+  "version": "0.0.6",
   "author": "usong <zdhuntero@gmail.com>",
   "type": "module",
   "scripts": {

@@ -15,6 +15,7 @@ async fn test_dashscope_provider_creation() {
         api_key: std::env::var("DASHSCOPE_API_KEY").unwrap_or_else(|_| "test_key".to_string()),
         language: "auto".to_string(),
         workspace_id: None,
+        diarization: false,
     };
 
     let stream = provider.start_stream(&config).await;
@@ -31,6 +32,7 @@ async fn test_dashscope_stream_placeholder_event() {
         api_key: std::env::var("DASHSCOPE_API_KEY").unwrap_or_else(|_| "test_key".to_string()),
         language: "auto".to_string(),
         workspace_id: None,
+        diarization: false,
     };
 
     let mut stream = provider.start_stream(&config).await.expect("start_stream");

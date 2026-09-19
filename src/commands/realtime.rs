@@ -93,6 +93,7 @@ pub async fn start_realtime_session(
         translate_provider: config.translate.provider.clone(),
         translate_model: config.translate.model.clone(),
         asr_model: config.asr.realtime_model.clone(),
+        diarization: false, // 实时链路不区分说话人
     };
     pipeline.init_checkpoint_in(app_data_dir, fingerprint).map_err(|e| e.to_string())?;
 

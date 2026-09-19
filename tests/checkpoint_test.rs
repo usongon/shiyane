@@ -11,6 +11,7 @@ fn fp(source_language: &str, target_lang: &str) -> CheckpointFingerprint {
         translate_provider: "openai".to_string(),
         translate_model: "gpt-3.5-turbo".to_string(),
         asr_model: "qwen-audio-3.0-asr-flash-filetrans".to_string(),
+        diarization: false,
     }
 }
 
@@ -219,4 +220,21 @@ fn test_append_updates_appends_lines() {
     let loaded = Checkpoint::load(&path).unwrap().unwrap();
     assert_eq!(loaded.segments[0].status, SegmentStatus::Completed);
     assert_eq!(loaded.segments[0].translated.as_deref(), Some("A"));
+}
+
+#[test]
+fn old_meta_without_diarization_loads_as_false() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("progress.jsonl");
+    let mut f = std::fs::File::create(&path).unwrap();
+    writeln!(
+        f,
+        r#"{{"task_id":"t","video_path":"/v.mp4","fingerprint":{{"source_language":"auto","target_lang":"zh","translate_provider":"openai","translate_model":"gpt","asr_model":"qwen"}}}}"#
+    )
+    .unwrap();
+    writeln!(f, "{}", serde_json::to_string(&pending(0, "hi")).unwrap()).unwrap();
+    drop(f);
+
+    let cp = Checkpoint::load(&path).unwrap().unwrap();
+    assert!(!cp.fingerprint.diarization, "旧 meta 无 diarization 字段按 false 加载");
 }

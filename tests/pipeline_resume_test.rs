@@ -21,7 +21,12 @@ fn fp(source_language: &str, target_lang: &str) -> CheckpointFingerprint {
         translate_provider: "openai".to_string(),
         translate_model: "gpt-3.5-turbo".to_string(),
         asr_model: "qwen-audio-3.0-asr-flash-filetrans".to_string(),
+        diarization: false,
     }
+}
+
+fn fp_d(source_language: &str, target_lang: &str, diarization: bool) -> CheckpointFingerprint {
+    CheckpointFingerprint { diarization, ..fp(source_language, target_lang) }
 }
 
 fn sentences(n: usize) -> Vec<TranscriptionSentence> {
@@ -133,6 +138,7 @@ fn build_stall_pipeline(
     fingerprint: CheckpointFingerprint,
     asr_sentences: Vec<TranscriptionSentence>,
     fail_texts: Vec<String>,
+    diarization: bool,
     tag: &str,
 ) -> (
     FilePipeline,
@@ -158,6 +164,7 @@ fn build_stall_pipeline(
         }),
         AppConfig::default(),
         fingerprint.source_language.clone(),
+        diarization,
     );
     pipeline
         .init_checkpoint_in(
@@ -176,6 +183,7 @@ fn build_pipeline(
     fingerprint: CheckpointFingerprint,
     asr_sentences: Vec<TranscriptionSentence>,
     fail_on: Option<usize>,
+    diarization: bool,
     tag: &str,
 ) -> (
     FilePipeline,
@@ -201,6 +209,7 @@ fn build_pipeline(
         }),
         AppConfig::default(),
         fingerprint.source_language.clone(),
+        diarization,
     );
     pipeline
         .init_checkpoint_in(
@@ -222,6 +231,7 @@ async fn fresh_run_persists_completed_checkpoint() {
         fp("auto", "zh"),
         sentences(5),
         None,
+        false,
         "fresh",
     );
 
@@ -253,6 +263,7 @@ async fn stalled_sentence_falls_back_to_source_and_completes() {
         fp("auto", "zh"),
         sentences(4),
         vec!["s1".to_string()],
+        false,
         "fb1",
     );
 
@@ -288,6 +299,7 @@ async fn five_consecutive_stalls_abort_with_honest_error() {
         fp("auto", "zh"),
         sentences(7),
         all_fail,
+        false,
         "brk",
     );
 
@@ -323,6 +335,7 @@ async fn non_consecutive_stalls_complete_with_fallbacks() {
         fp("auto", "zh"),
         sentences(5),
         vec!["s0".to_string(), "s1".to_string(), "s3".to_string()],
+        false,
         "fb2",
     );
 
@@ -357,6 +370,7 @@ async fn fallback_sentences_survive_resume_without_retranslate() {
         fp("auto", "zh"),
         sentences(4),
         vec!["s1".to_string()],
+        false,
         "f3a",
     );
     p1.process().await.unwrap();
@@ -367,6 +381,7 @@ async fn fallback_sentences_survive_resume_without_retranslate() {
         fp("auto", "zh"),
         sentences(4),
         vec![],
+        false,
         "f3b",
     );
     p2.process().await.unwrap();
@@ -390,6 +405,7 @@ async fn config_change_retranslate_clears_fallback_flags() {
         fp("auto", "zh"),
         sentences(4),
         vec!["s1".to_string()],
+        false,
         "f4a",
     );
     p1.process().await.unwrap();
@@ -400,6 +416,7 @@ async fn config_change_retranslate_clears_fallback_flags() {
         fp("auto", "en"),
         sentences(4),
         vec![],
+        false,
         "f4b",
     );
     p2.process().await.unwrap();
@@ -427,6 +444,7 @@ async fn resume_skips_asr_and_translates_rest() {
         fp("auto", "zh"),
         sentences(7),
         all_fail,
+        false,
         "r1",
     );
     assert!(p1.process().await.is_err());
@@ -439,6 +457,7 @@ async fn resume_skips_asr_and_translates_rest() {
         fp("auto", "zh"),
         sentences(7),
         vec![],
+        false,
         "r2",
     );
     p2.process().await.unwrap();
@@ -465,6 +484,7 @@ async fn all_completed_restores_instantly_without_api_calls() {
         fp("auto", "zh"),
         sentences(4),
         None,
+        false,
         "d1",
     );
     p1.process().await.unwrap();
@@ -475,6 +495,7 @@ async fn all_completed_restores_instantly_without_api_calls() {
         fp("auto", "zh"),
         sentences(4),
         None,
+        false,
         "d2",
     );
     p2.process().await.unwrap();
@@ -500,6 +521,7 @@ async fn target_lang_change_keeps_asr_retranslates_all() {
         fp("auto", "zh"),
         sentences(4),
         None,
+        false,
         "l1",
     );
     p1.process().await.unwrap();
@@ -510,6 +532,7 @@ async fn target_lang_change_keeps_asr_retranslates_all() {
         fp("auto", "en"),
         sentences(4),
         None,
+        false,
         "l2",
     );
     p2.process().await.unwrap();
@@ -534,6 +557,7 @@ async fn source_language_change_reruns_asr() {
         fp("auto", "zh"),
         sentences(4),
         None,
+        false,
         "s1",
     );
     p1.process().await.unwrap();
@@ -544,6 +568,7 @@ async fn source_language_change_reruns_asr() {
         fp("ja", "zh"),
         sentences(4),
         None,
+        false,
         "s2",
     );
     p2.process().await.unwrap();
@@ -561,6 +586,7 @@ async fn zero_sentence_asr_fails_clearly() {
         fp("auto", "zh"),
         sentences(0), // MockFileAsr 返回 0 句
         None,
+        false,
         "zero",
     );
 
@@ -712,6 +738,7 @@ async fn pause_during_translate_parks_state_and_keeps_checkpoint() {
         }),
         AppConfig::default(),
         "auto".to_string(),
+        false,
     );
     p.init_checkpoint_in(
         dir.path().to_path_buf(),
@@ -768,6 +795,7 @@ async fn pause_during_asr_returns_paused_without_persisting_sentences() {
         }),
         AppConfig::default(),
         "auto".to_string(),
+        false,
     );
     p.init_checkpoint_in(
         dir.path().to_path_buf(),
@@ -819,6 +847,7 @@ async fn pause_during_extract_returns_paused() {
         }),
         AppConfig::default(),
         "auto".to_string(),
+        false,
     );
     p.init_checkpoint_in(
         dir.path().to_path_buf(),
@@ -865,6 +894,7 @@ async fn resume_after_pause_completes_without_asr_rerun() {
         }),
         AppConfig::default(),
         "auto".to_string(),
+        false,
     );
     p1.init_checkpoint_in(
         dir.path().to_path_buf(),
@@ -887,6 +917,7 @@ async fn resume_after_pause_completes_without_asr_rerun() {
         fp("auto", "zh"),
         sentences(5),
         None,
+        false,
         "pz3b",
     );
     p2.process().await.unwrap();
@@ -916,6 +947,7 @@ async fn pre_cancelled_token_pauses_before_any_work() {
         fp("auto", "zh"),
         sentences(5),
         None,
+        false,
         "pc1",
     );
     p.cancel_handle().cancel(); // process 启动前已取消
@@ -955,6 +987,7 @@ async fn cancel_with_ready_response_harvests_paid_work() {
         }),
         AppConfig::default(),
         "auto".to_string(),
+        false,
     );
     p.init_checkpoint_in(
         dir.path().to_path_buf(),
@@ -1010,6 +1043,7 @@ async fn resume_seeds_translation_context_from_checkpoint() {
         fp("auto", "zh"),
         sentences(7),
         all_fail,
+        false,
         "x1",
     );
     assert!(p1.process().await.is_err());
@@ -1036,6 +1070,7 @@ async fn resume_seeds_translation_context_from_checkpoint() {
         }),
         AppConfig::default(),
         "auto".to_string(),
+        false,
     );
     p2.init_checkpoint_in(
         dir.path().to_path_buf(),
@@ -1054,4 +1089,24 @@ async fn resume_seeds_translation_context_from_checkpoint() {
         first.contains(&"s0".to_string()) && first.contains(&"s1".to_string()),
         "续翻首句 context 应含 s0/s1，实际: {first:?}"
     );
+}
+
+#[tokio::test]
+async fn diarization_flip_invalidates_asr_but_same_flag_resumes() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // 第一遍：开关关，跑完
+    let (mut p1, _e1, asr1, _c1) = build_pipeline(dir.path(), "t-diar", fp("auto", "zh"), sentences(5), None, false, "diar1");
+    p1.process().await.unwrap();
+    assert_eq!(asr1.load(Ordering::SeqCst), 1);
+
+    // 同开关重跑（已完成）：瞬时恢复，ASR 0 次
+    let (mut p2, _e2, asr2, _c2) = build_pipeline(dir.path(), "t-diar", fp("auto", "zh"), sentences(5), None, false, "diar2");
+    p2.process().await.unwrap();
+    assert_eq!(asr2.load(Ordering::SeqCst), 0);
+
+    // 开关翻转：asr_invalid → 全量重跑，ASR 1 次
+    let (mut p3, _e3, asr3, _c3) = build_pipeline(dir.path(), "t-diar", fp_d("auto", "zh", true), sentences(5), None, true, "diar3");
+    p3.process().await.unwrap();
+    assert_eq!(asr3.load(Ordering::SeqCst), 1);
 }

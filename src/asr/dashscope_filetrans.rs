@@ -13,6 +13,18 @@ pub struct DashScopeFileTransProvider {
     pub oss_config: Option<OssConfig>,
 }
 
+/// filetrans 提交 parameters（纯函数便于单测）：说话人分离按开关携带
+fn build_submit_parameters(language: &str, diarization: bool) -> serde_json::Value {
+    let mut params = json!({
+        "channel_id": [0],
+        "language_hints": [language],
+    });
+    if diarization {
+        params["diarization_enabled"] = json!(true);
+    }
+    params
+}
+
 #[async_trait]
 impl FileAsrProvider for DashScopeFileTransProvider {
     async fn transcribe_file(&self, config: &AsrConfig, audio_path: &Path) -> Result<FileTranscriptionResult> {
@@ -47,10 +59,7 @@ impl FileAsrProvider for DashScopeFileTransProvider {
             "input": {
                 "file_urls": [file_url.clone()]
             },
-            "parameters": {
-                "channel_id": [0],
-                "language_hints": [config.language.clone()]
-            }
+            "parameters": build_submit_parameters(&config.language, config.diarization)
         });
         
         let submit_resp = client
@@ -202,5 +211,20 @@ mod tests {
         assert_ne!(oss_object_name(a), oss_object_name(Path::new("/tmp/other.wav")));
         let n = oss_object_name(a);
         assert!(n.starts_with("shiyane-") && n.ends_with(".wav"));
+    }
+
+    #[test]
+    fn submit_parameters_omit_diarization_when_off() {
+        let p = build_submit_parameters("zh", false);
+        assert!(p.get("diarization_enabled").is_none(), "关闭时不得携带该键");
+        assert_eq!(p["language_hints"][0], "zh");
+        assert_eq!(p["channel_id"][0], 0);
+    }
+
+    #[test]
+    fn submit_parameters_enable_diarization_when_on() {
+        let p = build_submit_parameters("auto", true);
+        assert_eq!(p["diarization_enabled"], true);
+        assert_eq!(p["language_hints"][0], "auto");
     }
 }
