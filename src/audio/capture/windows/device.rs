@@ -34,7 +34,7 @@ use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 /// 100ms 缓冲对应的 hns（100ns 单位）
 const HNS_100MS: i64 = 100 * 10_000;
 
-const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
+pub(crate) const WAVE_FORMAT_IEEE_FLOAT: u16 = 3;
 const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
 /// KSDATAFORMAT_SUBTYPE_IEEE_FLOAT：{00000003-0000-0010-8000-00aa00389b71}
 const KSDATAFORMAT_SUBTYPE_IEEE_FLOAT: GUID =
@@ -237,7 +237,16 @@ fn spawn_endpoint_stream(
         unsafe { audio_client.GetMixFormat() }
             .map_err(|e| Error::AudioSource(format!("[{tag}] GetMixFormat 失败: {e}")))?,
     );
-    start_audio_client_stream(tag, audio_client, mix_format, stream_flags, HNS_100MS, tx, counter)
+    start_audio_client_stream(
+        tag,
+        audio_client,
+        mix_format,
+        stream_flags,
+        HNS_100MS,
+        false,
+        tx,
+        counter,
+    )
 }
 
 /// 已 Activate 的 IAudioClient 公共启动路径（Task 5 进程树 loopback 复用）：
@@ -249,6 +258,7 @@ pub(crate) fn start_audio_client_stream(
     mix_format: MixFormat,
     stream_flags: u32,
     buffer_hns: i64,
+    skip_padding: bool,
     tx: mpsc::Sender<AudioChunk>,
     counter: Arc<AtomicI64>,
 ) -> Result<StreamHandle> {
@@ -309,6 +319,7 @@ pub(crate) fn start_audio_client_stream(
                 tag,
                 channels,
                 source_rate,
+                skip_padding,
                 stop_flag,
                 tx,
                 counter,
@@ -331,6 +342,7 @@ fn capture_thread_main(
     tag: String,
     channels: u16,
     source_rate: u32,
+    skip_padding: bool,
     stop: Arc<AtomicBool>,
     tx: mpsc::Sender<AudioChunk>,
     counter: Arc<AtomicI64>,
@@ -349,6 +361,7 @@ fn capture_thread_main(
         &event,
         channels,
         source_rate,
+        skip_padding,
         &stop,
         &tx,
         &counter,
@@ -367,6 +380,7 @@ fn run_event_capture_loop(
     event: &EventGuard,
     channels: u16,
     source_rate: u32,
+    skip_padding: bool,
     stop: &AtomicBool,
     tx: &mpsc::Sender<AudioChunk>,
     counter: &AtomicI64,
@@ -378,15 +392,19 @@ fn run_event_capture_loop(
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        let padding = match unsafe { audio_client.GetCurrentPadding() } {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::error!("[{tag}] GetCurrentPadding 失败: {e}");
-                break;
+        // 进程 loopback 客户端不支持 GetCurrentPadding（真机实测 E_NOTIMPL，
+        // 官方样例循环也不查 padding）：事件驱动下事件到即有包，直接 GetBuffer
+        if !skip_padding {
+            let padding = match unsafe { audio_client.GetCurrentPadding() } {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::error!("[{tag}] GetCurrentPadding 失败: {e}");
+                    break;
+                }
+            };
+            if padding == 0 {
+                continue;
             }
-        };
-        if padding == 0 {
-            continue;
         }
 
         let mut data: *mut u8 = std::ptr::null_mut();

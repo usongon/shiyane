@@ -1,16 +1,16 @@
 //! 进程树 loopback 捕获（微软 ApplicationLoopback 官方样例移植）。
 //!
-//! `ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK, IAudioClient,
-//! VT_BLOB 激活参数)` → 完成回调 `GetActivateResult` 取 IAudioClient →
-//! `GetMixFormat`（进程 loopback 不可指定格式）→ `Initialize(SHARED,
-//! LOOPBACK|EVENTCALLBACK, 0, 0, mix_format)` → 复用 Task 4 的
-//! `start_audio_client_stream` 跑 event-driven 采集循环。
-//! 每个 pid 一条线程（同名合并组由 Task 6 拆成多条 spawn）。
+//! `ActivateAudioInterfaceAsync(VAD\Process_Loopback, IAudioClient, VT_BLOB
+//! 激活参数)` → 完成回调 `GetActivateResult` 取 IAudioClient → `GetMixFormat`
+//! （进程 loopback 不可指定格式）→ `Initialize(SHARED, LOOPBACK|EVENTCALLBACK,
+//! 0, 0, mix_format)` → 复用 Task 4 的 `start_audio_client_stream` 跑
+//! event-driven 采集循环。每个 pid 一条线程（同名合并组由 Task 6 拆成多条 spawn）。
 
 use super::device::{start_audio_client_stream, MixFormat, MtaInterface, StreamHandle};
 use super::ComGuard;
 use crate::audio::AudioChunk;
 use crate::{Error, Result};
+use std::mem::ManuallyDrop;
 use std::sync::atomic::AtomicI64;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -22,7 +22,7 @@ use windows::Win32::Media::Audio::{
     AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
     IActivateAudioInterfaceAsyncOperation, IActivateAudioInterfaceCompletionHandler,
     IActivateAudioInterfaceCompletionHandler_Impl, IAudioClient,
-    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
+    PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE, VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
 };
 use windows::Win32::System::Com::BLOB;
 use windows::Win32::System::Com::StructuredStorage::{
@@ -90,13 +90,16 @@ pub(crate) fn spawn_process_loopback(
     })?;
 
     // 1. 激活参数：AUDIOCLIENT_ACTIVATION_PARAMS 装进 VT_BLOB PropVariant。
-    //    blob 必须 CoTaskMemAlloc 堆分配且此后不手动释放：真机（Win11 26200）
-    //    实证栈 blob 在激活成功路径会触发系统侧 CoTaskMemFree（对栈指针做堆
-    //    释放 → 0xC0000374 堆损坏，激活完成后即崩）；而失败路径不触碰 blob。
-    //    MSDN 未记载 activateOptions 的所有权契约（官方 C++ 样例用栈，本机不
-    //    成立）。取「分配后移交、永不释放」：单次启动泄漏 ≤ size_of 参数结构，
-    //    用户手动启动采集为低频操作，可忽略；换来杜绝双重释放/UAF。
-    let activation_params: AUDIOCLIENT_ACTIVATION_PARAMS = AUDIOCLIENT_ACTIVATION_PARAMS {
+    //    两处真机踩坑存档（2026-09-19）：
+    //    a) 设备路径必须用 VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK 常量（其值为
+    //       "VAD\Process_Loopback"）。曾误把宏名当字面量传入（w!("VIRTUAL_AUDIO_
+    //       DEVICE_PROCESS_LOOPBACK")）→ 系统找不到该设备 → 激活一律
+    //       0x80070002（ERROR_FILE_NOT_FOUND）。
+    //    b) windows-rs 的 PROPVARIANT 自带 Drop=PropVariantClear，会对 VT_BLOB 的
+    //       pBlobData 做 CoTaskMemFree——栈 blob 即对栈指针做堆释放（0xC0000374/
+    //       0xC0000409 崩溃）。官方 C++ 样例语义是「栈参数 + 无人 clear」，故用
+    //       外层 ManuallyDrop 抑制 Drop（内层包 ManuallyDrop 无效，Drop 在外层）。
+    let mut activation_params: AUDIOCLIENT_ACTIVATION_PARAMS = AUDIOCLIENT_ACTIVATION_PARAMS {
         ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
         Anonymous: AUDIOCLIENT_ACTIVATION_PARAMS_0 {
             ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
@@ -105,23 +108,9 @@ pub(crate) fn spawn_process_loopback(
             },
         },
     };
-    let blob_data: *mut u8 = unsafe {
-        let p = windows::Win32::System::Com::CoTaskMemAlloc(
-            std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>(),
-        );
-        if p.is_null() {
-            return Err(Error::AudioSource(format!("[{tag}] CoTaskMemAlloc 失败")));
-        }
-        std::ptr::copy_nonoverlapping(
-            &activation_params as *const _ as *const u8,
-            p.cast(),
-            std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>(),
-        );
-        p.cast()
-    };
-    let propvariant: PROPVARIANT = PROPVARIANT {
+    let activate_options = ManuallyDrop::new(PROPVARIANT {
         Anonymous: PROPVARIANT_0 {
-            Anonymous: std::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
+            Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
                 vt: VT_BLOB,
                 wReserved1: 0,
                 wReserved2: 0,
@@ -129,12 +118,12 @@ pub(crate) fn spawn_process_loopback(
                 Anonymous: PROPVARIANT_0_0_0 {
                     blob: BLOB {
                         cbSize: std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
-                        pBlobData: blob_data,
+                        pBlobData: &mut activation_params as *mut _ as *mut u8,
                     },
                 },
             }),
         },
-    };
+    });
 
     // 2. 完成回调：结果存槽位，Condvar 唤醒
     let done: ActivateSlot = Arc::new((Mutex::new(None), Condvar::new()));
@@ -145,15 +134,16 @@ pub(crate) fn spawn_process_loopback(
     //    completionHandler 引用直到 operation 完成且应用释放 operation）
     let operation = unsafe {
         ActivateAudioInterfaceAsync(
-            windows::core::w!("VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK"),
+            VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
             &IAudioClient::IID,
-            Some(&propvariant as *const PROPVARIANT),
+            Some(&*activate_options as *const PROPVARIANT),
             &handler,
         )
     }
     .map_err(|e| Error::AudioSource(format!("[{tag}] ActivateAudioInterfaceAsync 失败: {e}")))?;
 
-    // 等待回调（5s 超时兜底）
+    // 等待回调（5s 超时兜底）。activation_params 与 activate_options 均在作用域内
+    // 存活至等待结束——官方样例同构。
     let (lock, cvar) = &*done;
     let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
     if guard.is_none() {
@@ -162,7 +152,6 @@ pub(crate) fn spawn_process_loopback(
             .unwrap_or_else(|e| e.into_inner());
         guard = g;
         if guard.is_none() {
-            drop(operation);
             return Err(Error::AudioSource(format!(
                 "[{tag}] 激活超时（5s, timed_out={}）",
                 timeout.timed_out()
@@ -176,11 +165,28 @@ pub(crate) fn spawn_process_loopback(
         None => return Err(Error::AudioSource(format!("[{tag}] 激活结果槽位为空"))),
     };
 
-    // 4. GetMixFormat（进程 loopback 不可指定格式）
-    let mix_format = MixFormat(
-        unsafe { audio_client.GetMixFormat() }
-            .map_err(|e| Error::AudioSource(format!("[{tag}] GetMixFormat 失败: {e}")))?,
-    );
+    // 4. 进程 loopback 的激活客户端不支持 GetMixFormat（真机实测 E_NOTIMPL）；
+    //    官方 ApplicationLoopback 样例同样自备格式（16bit PCM/44.1k）。这里自备
+    //    引擎原生格式 f32/2ch/48k——与采集循环的 f32 解读及共享模式引擎一致，
+    //    声道合并与 48k→16k 重采样沿用既有链路。
+    let mix_format = unsafe {
+        let p = windows::Win32::System::Com::CoTaskMemAlloc(
+            std::mem::size_of::<windows::Win32::Media::Audio::WAVEFORMATEX>(),
+        ) as *mut windows::Win32::Media::Audio::WAVEFORMATEX;
+        if p.is_null() {
+            return Err(Error::AudioSource(format!("[{tag}] CoTaskMemAlloc(WAVEFORMATEX) 失败")));
+        }
+        *p = windows::Win32::Media::Audio::WAVEFORMATEX {
+            wFormatTag: super::device::WAVE_FORMAT_IEEE_FLOAT,
+            nChannels: 2,
+            nSamplesPerSec: 48000,
+            wBitsPerSample: 32,
+            nBlockAlign: 8,
+            nAvgBytesPerSec: 48000 * 8,
+            cbSize: 0,
+        };
+        MixFormat(p)
+    };
 
     // 5. Initialize(SHARED, LOOPBACK|EVENTCALLBACK, 0, 0) + 采集循环（与 Task 4 完全一致，
     //    sample 参数：两个 duration 均为 0）
@@ -190,6 +196,7 @@ pub(crate) fn spawn_process_loopback(
         mix_format,
         AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
         0,
+        true,
         tx,
         counter,
     );
