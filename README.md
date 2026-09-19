@@ -65,7 +65,7 @@
 | 对象存储 | Endpoint / Bucket / AK | 例如 `oss-cn-hangzhou.aliyuncs.com` |
 | | 路径前缀 | 可选，例如 `shiyane-temp/` |
 
-每项配置保存前可测试连通性。配置文件与加密密钥存储在本地：
+语音识别与翻译配置在保存前可测试连通性。配置文件与加密密钥存储在本地：
 
 - macOS：`~/Library/Application Support/com.usongon.shiyane/`
 - Windows：`%APPDATA%\com.usongon.shiyane\`

@@ -65,7 +65,7 @@ Open the **Settings** tab and fill in by group:
 | Object storage | Endpoint / Bucket / AK | e.g. `oss-cn-hangzhou.aliyuncs.com` |
 | | Path prefix | Optional, e.g. `shiyane-temp/` |
 
-Each group can be connectivity-tested before saving. The config file and encrypted keys live at:
+Speech-recognition and translation settings can be connectivity-tested before saving. The config file and encrypted keys live at:
 
 - macOS: `~/Library/Application Support/com.usongon.shiyane/`
 - Windows: `%APPDATA%\com.usongon.shiyane\`
