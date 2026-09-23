@@ -36,7 +36,6 @@ impl AsrProvider for DashScopeAsrProvider {
                 .map_err(|e| Error::Asr(format!("Invalid header value: {}", e)))?,
         );
         
-        tracing::debug!("WebSocket request headers: {:?}", request.headers());
         tracing::debug!("API key length: {} chars", api_key.len());
         
         // Create WebSocket connection

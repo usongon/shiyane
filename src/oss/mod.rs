@@ -100,22 +100,14 @@ impl OssUploader {
         };
 
         let status = response.status();
-        let headers = response.headers().clone();
         let response_body = response
             .text()
             .await
             .unwrap_or_else(|_| "<failed to read body>".to_string());
 
-        tracing::info!(
-            "OSS upload response: status={}, headers={:?}, body={}",
-            status,
-            headers,
-            response_body
-        );
-        tracing::info!("OSS upload URL: {}", url);
-        tracing::info!("OSS Authorization header: {}", auth_header);
-        tracing::info!("OSS Content-MD5: {}", content_md5);
-        tracing::info!("OSS Date: {}", date);
+        tracing::info!("OSS upload response: status={}", status);
+        tracing::debug!("OSS upload response body: {}", response_body);
+        tracing::debug!("OSS Content-MD5: {}, Date: {}", content_md5, date);
 
         if !status.is_success() {
             return Err(Error::Config(format!(
