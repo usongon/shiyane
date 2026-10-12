@@ -1,0 +1,64 @@
+name: release
+
+# 出包 CI：tag 触发双平台构建，产物挂到同名 draft release
+# （notes 由人工按 docs/release-notes-template.md 补写后 publish）
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: macos-aarch64
+          - os: windows-latest
+            platform: windows-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # ffmpeg/ffprobe sidecar（tauri externalBin，不入库）
+      - name: Restore ffmpeg sidecars
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: binaries/
+          key: ffmpeg-${{ matrix.platform }}-${{ hashFiles('scripts/*ffmpeg*') }}
+
+      - name: Build ffmpeg sidecars (macOS, LGPL from source)
+        if: runner.os == 'macOS' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: bash scripts/build-ffmpeg.sh
+
+      - name: Fetch ffmpeg sidecars (Windows, BtbN LGPL builds)
+        if: runner.os == 'Windows' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: bash scripts/fetch-ffmpeg-windows.sh
+
+      - name: Run library tests
+        run: cargo test --lib
+
+      - name: Build and upload to draft release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # tag push：用 tag 名；手动冒烟：固定 ci-smoke（draft 跑完即删）
+          tagName: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'ci-smoke' }}
+          releaseName: "Shiyane ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'ci-smoke' }}"
+          releaseDraft: true
+          prerelease: false
