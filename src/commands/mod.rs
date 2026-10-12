@@ -425,8 +425,8 @@ pub async fn export_subtitle(
 pub async fn test_asr_connection(config: AppConfig) -> Result<String, String> {
     tracing::info!("test_asr_connection called");
     tracing::info!("ASR provider: {}", config.asr.provider);
-    tracing::info!("ASR api_key length: {} chars", config.asr.api_key.len());
-    tracing::info!("ASR workspace_id: {:?}", config.asr.workspace_id);
+    tracing::debug!("ASR api_key length: {} chars", config.asr.api_key.len());
+    tracing::debug!("ASR workspace_id: {:?}", config.asr.workspace_id);
     tracing::info!("OSS config present: {}", config.oss.is_some());
 
     // Validate required config

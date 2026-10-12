@@ -100,6 +100,25 @@ impl AppConfig {
             config.translate.api_key = keystore.decrypt(&config.translate.api_key)?;
         }
 
+        // OSS 凭证兼容存量明文：解密失败视为明文（GCM 认证失败是可靠判据），
+        // 当次运行按明文使用，并立即回写密文完成迁移
+        let mut oss_plaintext_found = false;
+        if let Some(oss) = config.oss.as_mut() {
+            for field in [&mut oss.access_key_id, &mut oss.access_key_secret] {
+                if field.is_empty() {
+                    continue;
+                }
+                match keystore.decrypt(field) {
+                    Ok(plain) => *field = plain,
+                    Err(_) => oss_plaintext_found = true,
+                }
+            }
+        }
+        if oss_plaintext_found {
+            tracing::warn!("OSS 凭证已从明文迁移为加密存储");
+            config.save(data_dir)?;
+        }
+
         Ok(config)
     }
 
@@ -117,6 +136,14 @@ impl AppConfig {
         }
         if !config.translate.api_key.is_empty() {
             config.translate.api_key = keystore.encrypt(&config.translate.api_key)?;
+        }
+        if let Some(oss) = config.oss.as_mut() {
+            if !oss.access_key_id.is_empty() {
+                oss.access_key_id = keystore.encrypt(&oss.access_key_id)?;
+            }
+            if !oss.access_key_secret.is_empty() {
+                oss.access_key_secret = keystore.encrypt(&oss.access_key_secret)?;
+            }
         }
         
         let content = serde_json::to_string_pretty(&config)?;
@@ -166,6 +193,92 @@ pub fn migrate_legacy_config(legacy_dir: &Path, data_dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_oss() -> OssConfig {
+        OssConfig {
+            endpoint: "oss-cn-beijing.aliyuncs.com".to_string(),
+            bucket: "demo-bucket".to_string(),
+            access_key_id: "LTAI5t9bExampleKeyId".to_string(),
+            access_key_secret: "AswejR9IExampleSecret30charsXyz".to_string(),
+            path_prefix: None,
+        }
+    }
+
+    #[test]
+    fn oss_credentials_roundtrip_through_encryption() {
+        let data = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.oss = Some(sample_oss());
+        config.save(data.path()).unwrap();
+
+        let raw: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(data.path().join("config.json")).unwrap(),
+        )
+        .unwrap();
+        let oss = raw["oss"].as_object().unwrap();
+        assert_ne!(oss["access_key_id"], "LTAI5t9bExampleKeyId");
+        assert_ne!(oss["access_key_secret"], "AswejR9IExampleSecret30charsXyz");
+        assert!(oss["access_key_id"].as_str().unwrap().len() > 40);
+
+        let reloaded = AppConfig::load(data.path()).unwrap();
+        let oss = reloaded.oss.unwrap();
+        assert_eq!(oss.access_key_id, "LTAI5t9bExampleKeyId");
+        assert_eq!(oss.access_key_secret, "AswejR9IExampleSecret30charsXyz");
+    }
+
+    #[test]
+    fn legacy_plaintext_oss_migrated_on_load() {
+        let data = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.oss = Some(sample_oss());
+        // 绕过 save 的加密直接落盘，模拟 v0.0.6 及更早的明文格式
+        std::fs::create_dir_all(data.path()).unwrap();
+        std::fs::write(
+            data.path().join("config.json"),
+            serde_json::to_string(&config).unwrap(),
+        )
+        .unwrap();
+
+        let reloaded = AppConfig::load(data.path()).unwrap();
+        let oss = reloaded.oss.unwrap();
+        assert_eq!(oss.access_key_id, "LTAI5t9bExampleKeyId");
+        assert_eq!(oss.access_key_secret, "AswejR9IExampleSecret30charsXyz");
+
+        let raw: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(data.path().join("config.json")).unwrap(),
+        )
+        .unwrap();
+        assert_ne!(raw["oss"]["access_key_id"], "LTAI5t9bExampleKeyId");
+        assert!(raw["oss"]["access_key_id"].as_str().unwrap().len() > 40);
+    }
+
+    #[test]
+    fn empty_oss_fields_stay_empty() {
+        let data = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.oss = Some(OssConfig {
+            endpoint: "e".to_string(),
+            bucket: "b".to_string(),
+            access_key_id: String::new(),
+            access_key_secret: String::new(),
+            path_prefix: None,
+        });
+        config.save(data.path()).unwrap();
+        let reloaded = AppConfig::load(data.path()).unwrap();
+        let oss = reloaded.oss.unwrap();
+        assert_eq!(oss.access_key_id, "");
+        assert_eq!(oss.access_key_secret, "");
+    }
+
+    #[test]
+    fn api_key_encryption_regression() {
+        let data = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::default();
+        config.asr.api_key = "sk-regression".to_string();
+        config.save(data.path()).unwrap();
+        let reloaded = AppConfig::load(data.path()).unwrap();
+        assert_eq!(reloaded.asr.api_key, "sk-regression");
+    }
 
     #[test]
     fn migrate_copies_config_and_salt_when_new_dir_empty() {

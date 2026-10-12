@@ -50,7 +50,7 @@ impl FileAsrProvider for DashScopeFileTransProvider {
         let uploader = OssUploader::new(oss_config.clone());
         let object_name = oss_object_name(audio_path);
         let file_url = uploader.upload_file(audio_path, &object_name).await?;
-        tracing::info!("Uploaded audio file to OSS: {}", file_url);
+        tracing::info!("Uploaded audio to OSS object: {}", object_name);
         
         // Step 2: Submit transcription task
         let submit_url = format!("{}/services/audio/asr/transcription", base_url);
@@ -138,7 +138,7 @@ impl FileAsrProvider for DashScopeFileTransProvider {
             }
         };
         
-        tracing::info!("Transcription completed, downloading result from: {}", transcription_url);
+        tracing::debug!("Transcription completed, downloading result from: {}", transcription_url);
         
         // Step 4: Download transcription result
         let result_resp = client
